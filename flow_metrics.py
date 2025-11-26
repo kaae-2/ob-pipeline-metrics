@@ -30,6 +30,7 @@ import sys
 import time
 
 import numpy as np
+import pandas as pd
 
 VALID_METRICS = {
     "accuracy",
@@ -47,20 +48,104 @@ VALID_METRICS = {
 CLASSIFICATION_METRICS = {"accuracy", "precision", "recall", "f1"}
 
 
+def _read_first_line(path):
+    """Read the first line of a (possibly gzipped) file."""
+    opener = gzip.open if path.endswith(".gz") else open
+    with opener(path, "rt") as handle:
+        return handle.readline()
+
+
+def _has_header(first_line):
+    """Heuristically decide whether the first line is a header row."""
+    tokens = [tok for tok in first_line.replace(",", " ").split() if tok]
+    if not tokens:
+        return False
+    for tok in tokens:
+        try:
+            float(tok)
+        except ValueError:
+            return True
+    return False
+
+
 def load_true_labels(data_file):
-    data = np.loadtxt(data_file, ndmin=1)
-    if data.ndim != 1:
+    """
+    Load labels as 1D array; keeps missing labels as NaN (needed for
+    semi-supervised handling in preprocessing).
+    """
+    first_line = _read_first_line(data_file)
+    has_header = _has_header(first_line)
+
+    opener = gzip.open if data_file.endswith(".gz") else open
+    with opener(data_file, "rt") as handle:
+        series = pd.read_csv(
+            handle,
+            header=0 if has_header else None,
+            comment="#",
+            na_values=["", '""', "nan", "NaN"],
+            skip_blank_lines=False,
+        ).iloc[:, 0]
+
+    try:
+        labels = pd.to_numeric(series, errors="coerce").to_numpy()
+    except Exception as exc:
+        raise ValueError("Invalid data structure, cannot parse labels.") from exc
+
+    if labels.ndim != 1:
         raise ValueError("Invalid data structure, not a 1D matrix?")
-    return data
+    return labels
 
 
 def load_predicted_labels(data_file):
-    data = np.loadtxt(data_file, ndmin=2, dtype=str, delimiter=",")
-    header = data[0,]
-    values = data[1:,].astype(int)
-    if data.ndim != 2:
+    """
+    Load predicted labels allowing for optional header rows and gzip input.
+    Returns a tuple of (column_headers, predictions_matrix).
+    """
+    first_line = _read_first_line(data_file)
+    has_header = _has_header(first_line)
+
+    opener = gzip.open if data_file.endswith(".gz") else open
+    parse_options = dict(
+        header=0 if has_header else None,
+        comment="#",
+        na_values=["", '""', "nan", "NaN"],
+        skip_blank_lines=False,
+    )
+
+    def _read_with_sep(sep):
+        with opener(data_file, "rt") as handle:
+            return pd.read_csv(
+                handle,
+                sep=sep,
+                engine="python",
+                **parse_options,
+            )
+
+    try:
+        df = _read_with_sep(",")
+    except pd.errors.ParserError:
+        # Fallback for whitespace-delimited predictions
+        df = _read_with_sep(r"\\s+")
+
+    if df.empty:
+        raise ValueError("Prediction file is empty.")
+
+    try:
+        values = df.apply(pd.to_numeric, errors="coerce").to_numpy()
+    except Exception as exc:
+        raise ValueError("Invalid data structure, cannot parse predictions.") from exc
+
+    if values.ndim == 1:
+        values = values.reshape(-1, 1)
+    if values.ndim != 2:
         raise ValueError("Invalid data structure, not a 2D matrix?")
-    return [header, values]
+
+    header = (
+        [str(col) for col in df.columns]
+        if has_header
+        else [f"run{i}" for i in range(values.shape[1])]
+    )
+    return [np.array(header, dtype=str), values]
 
 
 def parse_metric_argument(metric_arg):
@@ -259,9 +344,7 @@ def main():
         sys.exit(0)
 
     truth = load_true_labels(getattr(args, "data.true_labels"))
-    ks, predicted = load_predicted_labels(
-        getattr(args, "clustering.predicted_ks_range")
-    )
+    ks, predicted = load_predicted_labels(getattr(args, "analysis.prediction"))
     metrics_to_compute = parse_metric_argument(args.metric)
 
     if predicted.shape[0] != truth.shape[0]:
