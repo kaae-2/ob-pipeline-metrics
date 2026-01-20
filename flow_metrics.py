@@ -6,14 +6,16 @@ classification) using the same inputs as `run_metrics.py`, but focused on
 per-population prediction metrics instead of clustering comparison.
 
 Inputs mirror run_metrics:
-- --clustering.predicted_ks_range: csv-like file with header row of run IDs
-  (e.g. k=...) and one column of predictions per run
-- --data.true_labels: text file of ground-truth labels (1D)
+- --analysis.prediction: csv/txt (optionally gzipped) with columns of predictions
+  or a gzipped tar archive containing multiple prediction files (one per run)
+- --data.true_labels: text file (optionally gzipped) of ground-truth labels (1D)
 - --metric: comma-separated list from VALID_METRICS (or "all")
 - --output_dir/--name: where to write results; printed to stdout if omitted
 
 Metrics implemented (selected via --metric):
-- accuracy, precision, recall, f1 (per-population with macro averages)
+- accuracy, precision, recall/sensitivity, f1 (per-population with macro averages)
+- mcc (multi-class extension), pop_freq_corr (frequency correlation),
+  scaling_rate (per-pop accuracy divided by pop size)
 - runtime: time spent computing the metrics for that run
 - overlap: Jaccard overlap between predicted and true label sets (ignores 0)
 - scalability: runtime normalized by number of evaluated samples
@@ -24,9 +26,11 @@ metric computation itself, not the upstream model execution.
 
 import argparse
 import gzip
+import io
 import json
 import os
 import sys
+import tarfile
 import time
 
 import numpy as np
@@ -36,8 +40,12 @@ VALID_METRICS = {
     "accuracy",
     "precision",
     "recall",
+    "sensitivity",
     "f1",
     "f1_score",
+    "mcc",
+    "pop_freq_corr",
+    "scaling_rate",
     "runtime",
     "overlap",
     "scalability",
@@ -45,7 +53,16 @@ VALID_METRICS = {
 }
 
 
-CLASSIFICATION_METRICS = {"accuracy", "precision", "recall", "f1"}
+CLASSIFICATION_METRICS = {
+    "accuracy",
+    "precision",
+    "recall",
+    "sensitivity",
+    "f1",
+    "mcc",
+    "pop_freq_corr",
+    "scaling_rate",
+}
 
 
 def _read_first_line(path):
@@ -56,9 +73,16 @@ def _read_first_line(path):
 
 
 def _has_header(first_line):
-    """Heuristically decide whether the first line is a header row."""
+    """Heuristically decide whether the first line is a header row.
+
+    Treat a single-token line as data (not a header). A header is more likely
+    when the first line contains multiple non-numeric tokens (column names).
+    """
     tokens = [tok for tok in first_line.replace(",", " ").split() if tok]
     if not tokens:
+        return False
+    # Single token (e.g. a single string label) should not be treated as header.
+    if len(tokens) == 1:
         return False
     for tok in tokens:
         try:
@@ -73,6 +97,9 @@ def load_true_labels(data_file):
     Load labels as 1D array; keeps missing labels as NaN (needed for
     semi-supervised handling in preprocessing).
     """
+    if tarfile.is_tarfile(data_file):
+        return _load_true_labels_from_tar(data_file)
+
     first_line = _read_first_line(data_file)
     has_header = _has_header(first_line)
 
@@ -87,13 +114,38 @@ def load_true_labels(data_file):
         ).iloc[:, 0]
 
     try:
-        labels = pd.to_numeric(series, errors="coerce").to_numpy()
+        labels = series.to_numpy()
     except Exception as exc:
         raise ValueError("Invalid data structure, cannot parse labels.") from exc
 
     if labels.ndim != 1:
         raise ValueError("Invalid data structure, not a 1D matrix?")
     return labels
+
+
+def _load_true_labels_from_tar(data_file):
+    labels_list = []
+    with tarfile.open(data_file, "r:gz") as tar:
+        members = [m for m in tar.getmembers() if m.isfile()]
+        for member in members:
+            file_obj = tar.extractfile(member)
+            if file_obj is None:
+                continue
+            content = file_obj.read()
+            if member.name.endswith(".gz"):
+                content = gzip.decompress(content)
+            series = pd.read_csv(
+                io.BytesIO(content),
+                header=None,
+                comment="#",
+                na_values=["", '""', "nan", "NaN"],
+                skip_blank_lines=False,
+            ).iloc[:, 0]
+            labels_list.append(series)
+
+    if not labels_list:
+        return np.array([])
+    return pd.concat(labels_list, ignore_index=True).to_numpy()
 
 
 def load_predicted_labels(data_file):
@@ -105,12 +157,6 @@ def load_predicted_labels(data_file):
     has_header = _has_header(first_line)
 
     opener = gzip.open if data_file.endswith(".gz") else open
-    parse_options = dict(
-        header=0 if has_header else None,
-        comment="#",
-        na_values=["", '""', "nan", "NaN"],
-        skip_blank_lines=False,
-    )
 
     def _read_with_sep(sep):
         with opener(data_file, "rt") as handle:
@@ -118,20 +164,22 @@ def load_predicted_labels(data_file):
                 handle,
                 sep=sep,
                 engine="python",
-                **parse_options,
+                header=0 if has_header else None,
+                comment="#",
+                na_values=["", '""', "nan", "NaN"],
+                skip_blank_lines=False,
             )
 
     try:
         df = _read_with_sep(",")
     except pd.errors.ParserError:
-        # Fallback for whitespace-delimited predictions
-        df = _read_with_sep(r"\\s+")
+        df = _read_with_sep(r"\s+")
 
     if df.empty:
         raise ValueError("Prediction file is empty.")
 
     try:
-        values = df.apply(pd.to_numeric, errors="coerce").to_numpy()
+        values = df.to_numpy()
     except Exception as exc:
         raise ValueError("Invalid data structure, cannot parse predictions.") from exc
 
@@ -146,6 +194,85 @@ def load_predicted_labels(data_file):
         else [f"run{i}" for i in range(values.shape[1])]
     )
     return [np.array(header, dtype=str), values]
+
+
+def _parse_prediction_content(content):
+    """Parse a text blob of predictions into (headers, matrix)."""
+    first_line = content.splitlines()[0] if content else ""
+    has_header = _has_header(first_line)
+    def _read_with_sep(sep, text):
+        return pd.read_csv(
+            io.StringIO(text),
+            sep=sep,
+            engine="python",
+            header=0 if has_header else None,
+            comment="#",
+            na_values=["", '""', "nan", "NaN"],
+            skip_blank_lines=False,
+        )
+
+    try:
+        df = _read_with_sep(",", content)
+    except pd.errors.ParserError:
+        df = _read_with_sep(r"\s+", content)
+
+    if df.empty:
+        raise ValueError("Prediction file is empty.")
+
+    values = df.to_numpy()
+    if values.ndim == 1:
+        values = values.reshape(-1, 1)
+    if values.ndim != 2:
+        raise ValueError("Invalid data structure, not a 2D matrix?")
+
+    headers = (
+        [str(col) for col in df.columns]
+        if has_header
+        else [f"run{i}" for i in range(values.shape[1])]
+    )
+    return headers, values
+
+
+def _load_predictions_from_tar(path):
+    """Load predictions from a tar.gz of per-sample CSVs, preserving archive order."""
+    predictions = []
+    with tarfile.open(path, "r:gz") as tar:
+        members = [m for m in tar.getmembers() if m.isfile()]
+        if not members:
+            raise ValueError("Prediction archive is empty.")
+        for member in members:
+            file_obj = tar.extractfile(member)
+            if file_obj is None:
+                continue
+            content = file_obj.read()
+            if member.name.endswith(".gz"):
+                content = gzip.decompress(content)
+            series = pd.read_csv(
+                io.BytesIO(content),
+                header=None,
+                comment="#",
+                na_values=["", '""', "nan", "NaN"],
+                skip_blank_lines=False,
+            ).iloc[:, 0]
+            predictions.append(series)
+
+    if not predictions:
+        raise ValueError("Prediction archive is empty.")
+
+    concatenated = pd.concat(predictions, ignore_index=True).to_numpy()
+    return {"run0": concatenated}
+
+
+def _load_predictions_from_file(path):
+    headers, values = load_predicted_labels(path)
+    return {str(header): values[:, idx] for idx, header in enumerate(headers)}
+
+
+def load_predicted_runs(path):
+    """Load predictions from a plain file or a gzipped tar archive."""
+    if tarfile.is_tarfile(path):
+        return _load_predictions_from_tar(path)
+    return _load_predictions_from_file(path)
 
 
 def parse_metric_argument(metric_arg):
@@ -171,13 +298,24 @@ def _nan_safe_mean(values):
 def strip_noise_labels(y_true, y_pred):
     y_true = np.array(y_true, ndmin=1)
     y_pred = np.array(y_pred, ndmin=1)
-    mask = y_true > 0
-    return y_true[mask], y_pred[mask]
+
+    true_numeric = pd.to_numeric(y_true, errors="coerce")
+    pred_numeric = pd.to_numeric(y_pred, errors="coerce")
+    numeric_mask = np.all(pd.isna(y_true) | ~pd.isna(true_numeric))
+
+    if numeric_mask:
+        y_true = np.asarray(true_numeric)
+        y_pred = np.asarray(pred_numeric)
+        mask = y_true > 0
+        return y_true[mask], y_pred[mask]
+
+    return y_true, y_pred
 
 
 def compute_per_population_stats(y_true, y_pred):
     per_population = {}
     labels = np.unique(y_true)
+    total = y_true.size
     for label in labels:
         pop_mask = y_true == label
         pop_size = pop_mask.sum()
@@ -185,6 +323,7 @@ def compute_per_population_stats(y_true, y_pred):
         tp = correct
         fp = ((y_true != label) & (y_pred == label)).sum()
         fn = ((y_true == label) & (y_pred != label)).sum()
+        tn = total - tp - fp - fn
 
         pop_accuracy = float(correct / pop_size) if pop_size else float("nan")
         pop_precision = float(tp / (tp + fp)) if (tp + fp) else float("nan")
@@ -199,12 +338,20 @@ def compute_per_population_stats(y_true, y_pred):
             pop_f1 = float(
                 2 * pop_precision * pop_recall / (pop_precision + pop_recall)
             )
+        pop_scaling_rate = (
+            float(pop_accuracy / pop_size) if pop_size else float("nan")
+        )
 
         per_population[str(label)] = {
             "accuracy": pop_accuracy,
             "precision": pop_precision,
             "recall": pop_recall,
             "f1": pop_f1,
+            "tp": int(tp),
+            "fp": int(fp),
+            "fn": int(fn),
+            "tn": int(tn),
+            "scaling_rate": pop_scaling_rate,
             "support": int(pop_size),
         }
     return per_population
@@ -214,7 +361,67 @@ def compute_macro_scores(per_population):
     macro_precision = _nan_safe_mean([v["precision"] for v in per_population.values()])
     macro_recall = _nan_safe_mean([v["recall"] for v in per_population.values()])
     macro_f1 = _nan_safe_mean([v["f1"] for v in per_population.values()])
-    return macro_precision, macro_recall, macro_f1
+    macro_accuracy = _nan_safe_mean([v["accuracy"] for v in per_population.values()])
+    macro_scaling_rate = _nan_safe_mean(
+        [v["scaling_rate"] for v in per_population.values()]
+    )
+    return macro_precision, macro_recall, macro_f1, macro_accuracy, macro_scaling_rate
+
+
+def compute_confusion_matrix(y_true, y_pred):
+    labels = np.unique(np.concatenate([y_true, y_pred]))
+    label_to_idx = {label: idx for idx, label in enumerate(labels)}
+    matrix = np.zeros((labels.size, labels.size), dtype=int)
+    for t, p in zip(y_true, y_pred):
+        matrix[label_to_idx[t], label_to_idx[p]] += 1
+    return labels, matrix
+
+
+def compute_mcc(y_true, y_pred):
+    if y_true.size == 0:
+        return float("nan")
+    labels, cm = compute_confusion_matrix(y_true, y_pred)
+    n_samples = cm.sum()
+    if n_samples == 0:
+        return float("nan")
+
+    t_sum = cm.sum(axis=1)
+    p_sum = cm.sum(axis=0)
+    c = np.trace(cm)
+    s = (p_sum * t_sum).sum()
+
+    numerator = c * n_samples - s
+    denom_left = float(n_samples ** 2 - (p_sum ** 2).sum())
+    denom_right = float(n_samples ** 2 - (t_sum ** 2).sum())
+    denom_left = max(denom_left, 0.0)
+    denom_right = max(denom_right, 0.0)
+    denominator = np.sqrt(denom_left) * np.sqrt(denom_right)
+    if denominator == 0:
+        return float("nan")
+    return float(numerator / denominator)
+
+
+def compute_pop_freq_corr(y_true, y_pred):
+    true_labels, true_counts = np.unique(y_true, return_counts=True)
+    pred_labels, pred_counts = np.unique(y_pred, return_counts=True)
+
+    true_map = {label: count for label, count in zip(true_labels, true_counts)}
+    pred_map = {label: count for label, count in zip(pred_labels, pred_counts)}
+
+    labels = sorted(set(true_map) | set(pred_map))
+    if len(labels) < 2:
+        return float("nan")
+
+    true_freq = np.array([true_map.get(label, 0) for label in labels], dtype=float)
+    pred_freq = np.array([pred_map.get(label, 0) for label in labels], dtype=float)
+
+    true_std = np.std(true_freq)
+    pred_std = np.std(pred_freq)
+    if true_std == 0 or pred_std == 0:
+        return float("nan")
+
+    corr_matrix = np.corrcoef(pred_freq, true_freq)
+    return float(corr_matrix[0, 1])
 
 
 def metric_accuracy(base_stats):
@@ -229,8 +436,54 @@ def metric_recall(base_stats):
     return {"recall_macro": base_stats["macro_recall"]}
 
 
+def metric_sensitivity(base_stats):
+    return {"sensitivity_macro": base_stats["macro_recall"]}
+
+
 def metric_f1(base_stats):
     return {"f1_macro": base_stats["macro_f1"]}
+
+
+def metric_mcc(mcc_value):
+    return {"mcc": mcc_value}
+
+
+def metric_pop_freq_corr(correlation):
+    return {"pop_freq_corr": correlation}
+
+
+def metric_scaling_rate(base_stats):
+    return {"scaling_rate_macro": base_stats["macro_scaling_rate"]}
+
+
+def warn_missing_metrics(run_name, metrics_to_compute, results):
+    metric_keys = {
+        "accuracy": ["accuracy"],
+        "precision": ["precision_macro"],
+        "recall": ["recall_macro"],
+        "sensitivity": ["sensitivity_macro"],
+        "f1": ["f1_macro"],
+        "mcc": ["mcc"],
+        "pop_freq_corr": ["pop_freq_corr"],
+        "scaling_rate": ["scaling_rate_macro"],
+        "runtime": ["runtime_seconds"],
+        "overlap": ["overlap"],
+        "scalability": ["scalability_seconds_per_item"],
+    }
+
+    missing = []
+    for metric in metrics_to_compute:
+        keys = metric_keys.get(metric, [])
+        for key in keys:
+            if key not in results or results[key] is None:
+                missing.append(metric)
+                break
+
+    if missing:
+        print(
+            "Warning: metrics missing for run "
+            f"'{run_name}': {', '.join(sorted(set(missing)))}"
+        )
 
 
 def metric_overlap(y_true, y_pred):
@@ -265,6 +518,10 @@ def compute_prediction_metrics(y_true, y_pred, metrics_to_compute):
 
     y_true, y_pred = strip_noise_labels(y_true, y_pred)
 
+    valid_mask = (~pd.isna(y_true)) & (~pd.isna(y_pred))
+    y_true = y_true[valid_mask]
+    y_pred = y_pred[valid_mask]
+
     if y_true.shape[0] != y_pred.shape[0]:
         raise ValueError("Predicted labels and true labels must align in length.")
 
@@ -273,7 +530,13 @@ def compute_prediction_metrics(y_true, y_pred, metrics_to_compute):
     # Base stats computed once for classification-style metrics
     if any(metric in CLASSIFICATION_METRICS for metric in metrics_to_compute):
         per_population = compute_per_population_stats(y_true, y_pred)
-        macro_precision, macro_recall, macro_f1 = compute_macro_scores(per_population)
+        (
+            macro_precision,
+            macro_recall,
+            macro_f1,
+            macro_accuracy,
+            macro_scaling_rate,
+        ) = compute_macro_scores(per_population)
         base_stats = {
             "per_population": per_population,
             "overall_accuracy": (
@@ -282,13 +545,26 @@ def compute_prediction_metrics(y_true, y_pred, metrics_to_compute):
             "macro_precision": macro_precision,
             "macro_recall": macro_recall,
             "macro_f1": macro_f1,
+            "macro_accuracy": macro_accuracy,
+            "macro_scaling_rate": macro_scaling_rate,
         }
+
+        mcc_value = compute_mcc(y_true, y_pred) if "mcc" in metrics_to_compute else None
+        pop_freq_corr = (
+            compute_pop_freq_corr(y_true, y_pred)
+            if "pop_freq_corr" in metrics_to_compute
+            else None
+        )
 
         metric_dispatch = {
             "accuracy": lambda: metric_accuracy(base_stats),
             "precision": lambda: metric_precision(base_stats),
             "recall": lambda: metric_recall(base_stats),
+            "sensitivity": lambda: metric_sensitivity(base_stats),
             "f1": lambda: metric_f1(base_stats),
+            "mcc": lambda: metric_mcc(mcc_value),
+            "pop_freq_corr": lambda: metric_pop_freq_corr(pop_freq_corr),
+            "scaling_rate": lambda: metric_scaling_rate(base_stats),
         }
 
         for metric_name, fn in metric_dispatch.items():
@@ -316,7 +592,7 @@ def main():
         "--analysis.prediction",
         type=str,
         required=True,
-        help="csv text file with header row (k values) and columns of predictions",
+        help="csv/txt predictions (optionally gzipped) or a gzipped tar of multiple prediction files",
     )
     parser.add_argument(
         "--data.true_labels",
@@ -344,20 +620,21 @@ def main():
         sys.exit(0)
 
     truth = load_true_labels(getattr(args, "data.true_labels"))
-    ks, predicted = load_predicted_labels(getattr(args, "analysis.prediction"))
+    predicted_runs = load_predicted_runs(getattr(args, "analysis.prediction"))
     metrics_to_compute = parse_metric_argument(args.metric)
 
-    if predicted.shape[0] != truth.shape[0]:
-        raise ValueError(
-            f"Predicted labels rows ({predicted.shape[0]}) do not match true labels ({truth.shape[0]})."
-        )
-
     results = {}
-    for idx, k_label in enumerate(ks):
-        metrics_for_k = compute_prediction_metrics(
-            truth, predicted[:, idx], metrics_to_compute
+    for run_name, predictions in predicted_runs.items():
+        if predictions.shape[0] != truth.shape[0]:
+            raise ValueError(
+                f"Predicted labels rows ({predictions.shape[0]}) do not match true labels ({truth.shape[0]}) for run '{run_name}'."
+            )
+
+        metrics_for_run = compute_prediction_metrics(
+            truth, predictions, metrics_to_compute
         )
-        results[str(k_label)] = metrics_for_k
+        warn_missing_metrics(run_name, metrics_to_compute, metrics_for_run)
+        results[str(run_name)] = metrics_for_run
 
     payload = {
         "name": args.name,

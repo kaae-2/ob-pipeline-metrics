@@ -9,6 +9,6 @@ python_bin="${script_dir}/.venv/bin/python"
 "${python_bin}" "${script_dir}/flow_metrics.py" \
   --name "dgcytof" \
   --output_dir "${script_dir}/out/data/metrics/all/flow_metrics" \
-  --analysis.prediction "${script_dir}/out/data/analysis/default/dgcytof/dgcytof_predicted_labels.txt" \
-  --data.true_labels "${script_dir}/out/data/data_preprocessing/default/data_preprocessing_labels.txt" \
+  --analysis.prediction "${script_dir}/out/data/analysis/default/dgcytof/dgcytof_predicted_labels.tar.gz" \
+  --data.true_labels "${script_dir}/out/data/data_preprocessing/default/data_import.test.labels.tar.gz" \
   --metric "all"
