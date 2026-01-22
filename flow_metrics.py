@@ -32,6 +32,7 @@ import os
 import sys
 import tarfile
 import time
+from glob import glob
 
 import numpy as np
 import pandas as pd
@@ -97,6 +98,14 @@ def load_true_labels(data_file):
     Load labels as 1D array; keeps missing labels as NaN (needed for
     semi-supervised handling in preprocessing).
     """
+    labels, _, _ = load_true_labels_with_samples(data_file)
+    return labels
+
+
+def load_true_labels_with_samples(data_file):
+    """
+    Load labels as a concatenated 1D array plus per-sample mapping.
+    """
     if tarfile.is_tarfile(data_file):
         return _load_true_labels_from_tar(data_file)
 
@@ -120,11 +129,14 @@ def load_true_labels(data_file):
 
     if labels.ndim != 1:
         raise ValueError("Invalid data structure, not a 1D matrix?")
-    return labels
+    sample_id = "sample0"
+    return labels, {sample_id: labels}, [sample_id]
 
 
 def _load_true_labels_from_tar(data_file):
     labels_list = []
+    labels_by_sample = {}
+    sample_order = []
     with tarfile.open(data_file, "r:gz") as tar:
         members = [m for m in tar.getmembers() if m.isfile()]
         for member in members:
@@ -142,10 +154,17 @@ def _load_true_labels_from_tar(data_file):
                 skip_blank_lines=False,
             ).iloc[:, 0]
             labels_list.append(series)
+            sample_id = member.name
+            labels_by_sample[sample_id] = series.to_numpy()
+            sample_order.append(sample_id)
 
     if not labels_list:
-        return np.array([])
-    return pd.concat(labels_list, ignore_index=True).to_numpy()
+        return np.array([]), {}, []
+    return (
+        pd.concat(labels_list, ignore_index=True).to_numpy(),
+        labels_by_sample,
+        sample_order,
+    )
 
 
 def load_predicted_labels(data_file):
@@ -236,6 +255,8 @@ def _parse_prediction_content(content):
 def _load_predictions_from_tar(path):
     """Load predictions from a tar.gz of per-sample CSVs, preserving archive order."""
     predictions = []
+    predictions_by_sample = {}
+    sample_order = []
     with tarfile.open(path, "r:gz") as tar:
         members = [m for m in tar.getmembers() if m.isfile()]
         if not members:
@@ -255,12 +276,15 @@ def _load_predictions_from_tar(path):
                 skip_blank_lines=False,
             ).iloc[:, 0]
             predictions.append(series)
+            sample_id = member.name
+            predictions_by_sample[sample_id] = series.to_numpy()
+            sample_order.append(sample_id)
 
     if not predictions:
         raise ValueError("Prediction archive is empty.")
 
     concatenated = pd.concat(predictions, ignore_index=True).to_numpy()
-    return {"run0": concatenated}
+    return {"run0": concatenated}, {"run0": predictions_by_sample}, sample_order
 
 
 def _load_predictions_from_file(path):
@@ -272,7 +296,63 @@ def load_predicted_runs(path):
     """Load predictions from a plain file or a gzipped tar archive."""
     if tarfile.is_tarfile(path):
         return _load_predictions_from_tar(path)
-    return _load_predictions_from_file(path)
+    return _load_predictions_from_file(path), None, None
+
+
+def _split_predictions_by_truth(predictions, truth_by_sample, sample_order):
+    if not truth_by_sample or not sample_order:
+        return None
+    lengths = [len(truth_by_sample[sample_id]) for sample_id in sample_order]
+    if sum(lengths) != len(predictions):
+        return None
+    split = {}
+    offset = 0
+    for sample_id, length in zip(sample_order, lengths):
+        split[sample_id] = predictions[offset : offset + length]
+        offset += length
+    return split
+
+
+def _read_label_key(path):
+    if not path or not os.path.exists(path):
+        return {}
+    opener = gzip.open if path.endswith(".gz") else open
+    with opener(path, "rt") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        return {}
+    id_to_label = payload.get("id_to_label")
+    if not isinstance(id_to_label, dict):
+        return {}
+    return {str(key): str(value) for key, value in id_to_label.items()}
+
+
+def _infer_label_key_path(true_labels_path, name):
+    directory = os.path.dirname(true_labels_path)
+    candidate = os.path.join(directory, f"{name}.label_key.json.gz")
+    if os.path.exists(candidate):
+        return candidate
+
+    filename = os.path.basename(true_labels_path)
+    suffixes = [
+        ".test.labels.tar.gz",
+        ".train.labels.tar.gz",
+        ".labels.tar.gz",
+        ".labels.gz",
+        ".labels",
+    ]
+    for suffix in suffixes:
+        if filename.endswith(suffix):
+            base = filename[: -len(suffix)]
+            candidate = os.path.join(directory, f"{base}.label_key.json.gz")
+            if os.path.exists(candidate):
+                return candidate
+            break
+
+    candidates = glob(os.path.join(directory, "*.label_key.json.gz"))
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
 
 
 def parse_metric_argument(metric_arg):
@@ -312,10 +392,11 @@ def strip_noise_labels(y_true, y_pred):
     return y_true, y_pred
 
 
-def compute_per_population_stats(y_true, y_pred):
+def compute_per_population_stats(y_true, y_pred, id_to_label=None):
     per_population = {}
     labels = np.unique(y_true)
     total = y_true.size
+    label_lookup = id_to_label or {}
     for label in labels:
         pop_mask = y_true == label
         pop_size = pop_mask.sum()
@@ -353,6 +434,8 @@ def compute_per_population_stats(y_true, y_pred):
             "tn": int(tn),
             "scaling_rate": pop_scaling_rate,
             "support": int(pop_size),
+            "n": int(pop_size),
+            "population_name": label_lookup.get(str(label)),
         }
     return per_population
 
@@ -509,7 +592,7 @@ def metric_scalability(runtime_seconds, n_items):
     }
 
 
-def compute_prediction_metrics(y_true, y_pred, metrics_to_compute):
+def compute_prediction_metrics(y_true, y_pred, metrics_to_compute, id_to_label=None):
     """
     Computes per-population metrics and optional runtime/overlap/scalability
     for a single set of predictions.
@@ -526,10 +609,13 @@ def compute_prediction_metrics(y_true, y_pred, metrics_to_compute):
         raise ValueError("Predicted labels and true labels must align in length.")
 
     results = {}
+    results["n"] = int(y_true.size)
 
     # Base stats computed once for classification-style metrics
     if any(metric in CLASSIFICATION_METRICS for metric in metrics_to_compute):
-        per_population = compute_per_population_stats(y_true, y_pred)
+        per_population = compute_per_population_stats(
+            y_true, y_pred, id_to_label=id_to_label
+        )
         (
             macro_precision,
             macro_recall,
@@ -619,8 +705,16 @@ def main():
         parser.print_help()
         sys.exit(0)
 
-    truth = load_true_labels(getattr(args, "data.true_labels"))
-    predicted_runs = load_predicted_runs(getattr(args, "analysis.prediction"))
+    truth, truth_by_sample, truth_sample_order = load_true_labels_with_samples(
+        getattr(args, "data.true_labels")
+    )
+    predicted_runs, predicted_samples, _ = load_predicted_runs(
+        getattr(args, "analysis.prediction")
+    )
+    label_key_path = _infer_label_key_path(
+        getattr(args, "data.true_labels"), args.name
+    )
+    id_to_label = _read_label_key(label_key_path)
     metrics_to_compute = parse_metric_argument(args.metric)
 
     results = {}
@@ -631,8 +725,44 @@ def main():
             )
 
         metrics_for_run = compute_prediction_metrics(
-            truth, predictions, metrics_to_compute
+            truth, predictions, metrics_to_compute, id_to_label=id_to_label
         )
+        per_sample_predictions = None
+        if predicted_samples and run_name in predicted_samples:
+            per_sample_predictions = predicted_samples[run_name]
+        else:
+            per_sample_predictions = _split_predictions_by_truth(
+                predictions, truth_by_sample, truth_sample_order
+            )
+
+        per_sample_metrics = {}
+        if per_sample_predictions:
+            for sample_id, sample_pred in per_sample_predictions.items():
+                sample_truth = truth_by_sample.get(sample_id)
+                if sample_truth is None and len(truth_by_sample) == 1:
+                    only_truth = next(iter(truth_by_sample.values()))
+                    if len(only_truth) == len(sample_pred):
+                        sample_truth = only_truth
+                if sample_truth is None:
+                    continue
+                per_sample_metrics[sample_id] = compute_prediction_metrics(
+                    sample_truth,
+                    sample_pred,
+                    metrics_to_compute,
+                    id_to_label=id_to_label,
+                )
+
+        if not per_sample_metrics:
+            per_sample_metrics = {
+                "sample0": compute_prediction_metrics(
+                    truth,
+                    predictions,
+                    metrics_to_compute,
+                    id_to_label=id_to_label,
+                )
+            }
+
+        metrics_for_run["per_sample"] = per_sample_metrics
         warn_missing_metrics(run_name, metrics_to_compute, metrics_for_run)
         results[str(run_name)] = metrics_for_run
 
