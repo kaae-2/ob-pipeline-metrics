@@ -687,6 +687,11 @@ def main():
         help="text file containing the true labels (1D)",
     )
     parser.add_argument(
+        "--data.label_key",
+        type=str,
+        help="label key mapping file (optional)",
+    )
+    parser.add_argument(
         "--output_dir",
         type=str,
         help="output directory to store results (prints to stdout if omitted)",
@@ -711,7 +716,7 @@ def main():
     predicted_runs, predicted_samples, _ = load_predicted_runs(
         getattr(args, "analysis.prediction")
     )
-    label_key_path = _infer_label_key_path(
+    label_key_path = getattr(args, "data.label_key") or _infer_label_key_path(
         getattr(args, "data.true_labels"), args.name
     )
     id_to_label = _read_label_key(label_key_path)
