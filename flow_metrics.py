@@ -29,6 +29,7 @@ import gzip
 import io
 import json
 import os
+import re
 import sys
 import tarfile
 import time
@@ -311,6 +312,66 @@ def _split_predictions_by_truth(predictions, truth_by_sample, sample_order):
         split[sample_id] = predictions[offset : offset + length]
         offset += length
     return split
+
+
+def _sample_key_from_name(name):
+    base = os.path.basename(name)
+    while True:
+        root, ext = os.path.splitext(base)
+        if ext in {".gz", ".csv", ".txt"}:
+            base = root
+            continue
+        break
+    matches = re.findall(r"\d+", base)
+    if matches:
+        return matches[-1]
+    return base
+
+
+def _build_sample_key_map(sample_ids, label):
+    mapping = {}
+    for sample_id in sample_ids:
+        key = _sample_key_from_name(sample_id)
+        if key in mapping:
+            raise ValueError(
+                f"Duplicate {label} sample key '{key}' from '{sample_id}' and '{mapping[key]}'"
+            )
+        mapping[key] = sample_id
+    return mapping
+
+
+def _align_predictions_to_truth(truth_by_sample, truth_order, pred_by_sample, run_name):
+    truth_map = _build_sample_key_map(truth_order, "truth")
+    pred_map = _build_sample_key_map(pred_by_sample.keys(), "prediction")
+
+    missing = sorted(set(truth_map) - set(pred_map))
+    extra = sorted(set(pred_map) - set(truth_map))
+    if missing or extra:
+        message = [
+            f"Sample mismatch for run '{run_name}'.",
+            f"Missing prediction keys: {missing}" if missing else None,
+            f"Extra prediction keys: {extra}" if extra else None,
+        ]
+        raise ValueError(" ".join([part for part in message if part]))
+
+    aligned_predictions = {}
+    aligned_concat = []
+    for truth_id in truth_order:
+        key = _sample_key_from_name(truth_id)
+        pred_id = pred_map[key]
+        truth_values = truth_by_sample[truth_id]
+        pred_values = pred_by_sample[pred_id]
+        if len(truth_values) != len(pred_values):
+            raise ValueError(
+                "Sample length mismatch for run "
+                f"'{run_name}' (truth '{truth_id}' vs prediction '{pred_id}')."
+            )
+        aligned_predictions[truth_id] = pred_values
+        aligned_concat.append(pred_values)
+
+    if not aligned_concat:
+        return aligned_predictions, np.array([])
+    return aligned_predictions, np.concatenate(aligned_concat)
 
 
 def _read_label_key(path):
@@ -724,6 +785,19 @@ def main():
 
     results = {}
     for run_name, predictions in predicted_runs.items():
+        per_sample_predictions = None
+        if predicted_samples and run_name in predicted_samples:
+            per_sample_predictions, predictions = _align_predictions_to_truth(
+                truth_by_sample,
+                truth_sample_order,
+                predicted_samples[run_name],
+                run_name,
+            )
+        else:
+            per_sample_predictions = _split_predictions_by_truth(
+                predictions, truth_by_sample, truth_sample_order
+            )
+
         if predictions.shape[0] != truth.shape[0]:
             raise ValueError(
                 f"Predicted labels rows ({predictions.shape[0]}) do not match true labels ({truth.shape[0]}) for run '{run_name}'."
@@ -732,13 +806,6 @@ def main():
         metrics_for_run = compute_prediction_metrics(
             truth, predictions, metrics_to_compute, id_to_label=id_to_label
         )
-        per_sample_predictions = None
-        if predicted_samples and run_name in predicted_samples:
-            per_sample_predictions = predicted_samples[run_name]
-        else:
-            per_sample_predictions = _split_predictions_by_truth(
-                predictions, truth_by_sample, truth_sample_order
-            )
 
         per_sample_metrics = {}
         if per_sample_predictions:
