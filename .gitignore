@@ -1,4 +1,12 @@
-out/*
+# Ignore everything under `out/` by default
+out/**
+
+# But do not ignore directories under `out/` so that git can reach the files we want to keep
+!/out/**/
+
+# Allow committing any flow_metrics.json.gz files under out (recursive)
+!/out/**/*flow_metrics.json.gz
+
+# Other environment / cache ignores
 .venv/
-__pycache__/*
-!out/**/*flow_metrics.json.gz
+__pycache__/
