@@ -269,13 +269,19 @@ def _load_predictions_from_tar(path):
             content = file_obj.read()
             if member.name.endswith(".gz"):
                 content = gzip.decompress(content)
-            series = pd.read_csv(
-                io.BytesIO(content),
-                header=None,
-                comment="#",
-                na_values=["", '""', "nan", "NaN"],
-                skip_blank_lines=False,
-            ).iloc[:, 0]
+            if not content or content.strip() == b"":
+                series = pd.Series([], dtype=float)
+            else:
+                try:
+                    series = pd.read_csv(
+                        io.BytesIO(content),
+                        header=None,
+                        comment="#",
+                        na_values=["", '""', "nan", "NaN"],
+                        skip_blank_lines=False,
+                    ).iloc[:, 0]
+                except pd.errors.EmptyDataError:
+                    series = pd.Series([], dtype=float)
             predictions.append(series)
             sample_id = member.name
             predictions_by_sample[sample_id] = series.to_numpy()
@@ -340,7 +346,9 @@ def _build_sample_key_map(sample_ids, label):
     return mapping
 
 
-def _align_predictions_to_truth(truth_by_sample, truth_order, pred_by_sample, run_name):
+def _align_predictions_to_truth(
+    truth_by_sample, truth_order, pred_by_sample, run_name, ungated_id=None
+):
     truth_map = _build_sample_key_map(truth_order, "truth")
     pred_map = _build_sample_key_map(pred_by_sample.keys(), "prediction")
 
@@ -361,6 +369,12 @@ def _align_predictions_to_truth(truth_by_sample, truth_order, pred_by_sample, ru
         pred_id = pred_map[key]
         truth_values = truth_by_sample[truth_id]
         pred_values = pred_by_sample[pred_id]
+        if len(pred_values) == 0:
+            if ungated_id is None:
+                raise ValueError(
+                    "Empty prediction file and no 'Ungated' label id available."
+                )
+            pred_values = np.full(len(truth_values), ungated_id)
         if len(truth_values) != len(pred_values):
             raise ValueError(
                 "Sample length mismatch for run "
@@ -386,6 +400,29 @@ def _read_label_key(path):
     if not isinstance(id_to_label, dict):
         return {}
     return {str(key): str(value) for key, value in id_to_label.items()}
+
+
+def _lookup_ungated_id(id_to_label):
+    for key, label in id_to_label.items():
+        if str(label).strip().lower() == "ungated":
+            try:
+                return int(key)
+            except ValueError:
+                return str(key)
+    return None
+
+
+def _fill_missing_predictions(values, replacement):
+    if replacement is None:
+        return values
+    if values.size == 0:
+        return values
+    mask = pd.isna(values)
+    if not np.any(mask):
+        return values
+    filled = values.copy()
+    filled[mask] = replacement
+    return filled
 
 
 def _infer_label_key_path(true_labels_path, name):
@@ -781,6 +818,7 @@ def main():
         getattr(args, "data.true_labels"), args.name
     )
     id_to_label = _read_label_key(label_key_path)
+    ungated_id = _lookup_ungated_id(id_to_label)
     metrics_to_compute = parse_metric_argument(args.metric)
 
     results = {}
@@ -792,11 +830,26 @@ def main():
                 truth_sample_order,
                 predicted_samples[run_name],
                 run_name,
+                ungated_id=ungated_id,
             )
         else:
             per_sample_predictions = _split_predictions_by_truth(
                 predictions, truth_by_sample, truth_sample_order
             )
+
+        if ungated_id is None and per_sample_predictions:
+            missing = any(len(values) == 0 for values in per_sample_predictions.values())
+            if missing:
+                raise ValueError(
+                    "Empty prediction file and no 'Ungated' label id available."
+                )
+
+        if per_sample_predictions:
+            per_sample_predictions = {
+                key: _fill_missing_predictions(values, ungated_id)
+                for key, values in per_sample_predictions.items()
+            }
+        predictions = _fill_missing_predictions(predictions, ungated_id)
 
         if predictions.shape[0] != truth.shape[0]:
             raise ValueError(
