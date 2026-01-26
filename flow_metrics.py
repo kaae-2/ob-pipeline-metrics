@@ -347,7 +347,12 @@ def _build_sample_key_map(sample_ids, label):
 
 
 def _align_predictions_to_truth(
-    truth_by_sample, truth_order, pred_by_sample, run_name, ungated_id=None
+    truth_by_sample,
+    truth_order,
+    pred_by_sample,
+    run_name,
+    ungated_id=None,
+    warn_state=None,
 ):
     truth_map = _build_sample_key_map(truth_order, "truth")
     pred_map = _build_sample_key_map(pred_by_sample.keys(), "prediction")
@@ -364,17 +369,26 @@ def _align_predictions_to_truth(
 
     aligned_predictions = {}
     aligned_concat = []
+    effective_ungated_id = ungated_id
     for truth_id in truth_order:
         key = _sample_key_from_name(truth_id)
         pred_id = pred_map[key]
         truth_values = truth_by_sample[truth_id]
         pred_values = pred_by_sample[pred_id]
         if len(pred_values) == 0:
-            if ungated_id is None:
-                raise ValueError(
-                    "Empty prediction file and no 'Ungated' label id available."
-                )
-            pred_values = np.full(len(truth_values), ungated_id)
+            if effective_ungated_id is None:
+                effective_ungated_id = _synthesize_ungated_id(truth_values)
+                if effective_ungated_id is None:
+                    raise ValueError(
+                        "Empty prediction file and no 'Ungated' label id available."
+                    )
+                if warn_state is not None and not warn_state.get("synthetic_ungated"):
+                    print(
+                        "Warning: empty prediction file; using synthetic 'Ungated' label for metrics only.",
+                        file=sys.stderr,
+                    )
+                    warn_state["synthetic_ungated"] = True
+            pred_values = np.full(len(truth_values), effective_ungated_id)
         if len(truth_values) != len(pred_values):
             raise ValueError(
                 "Sample length mismatch for run "
@@ -384,8 +398,8 @@ def _align_predictions_to_truth(
         aligned_concat.append(pred_values)
 
     if not aligned_concat:
-        return aligned_predictions, np.array([])
-    return aligned_predictions, np.concatenate(aligned_concat)
+        return aligned_predictions, np.array([]), effective_ungated_id
+    return aligned_predictions, np.concatenate(aligned_concat), effective_ungated_id
 
 
 def _read_label_key(path):
@@ -410,6 +424,19 @@ def _lookup_ungated_id(id_to_label):
             except ValueError:
                 return str(key)
     return None
+
+
+def _synthesize_ungated_id(truth_values):
+    truth_numeric = pd.to_numeric(np.ravel(truth_values), errors="coerce")
+    truth_numeric = np.asarray(truth_numeric, dtype=float)
+    truth_numeric = truth_numeric[~np.isnan(truth_numeric)]
+    if truth_numeric.size == 0:
+        return None
+    try:
+        max_value = int(np.max(truth_numeric))
+    except (ValueError, TypeError):
+        return None
+    return max_value + 1
 
 
 def _fill_missing_predictions(values, replacement):
@@ -821,16 +848,18 @@ def main():
     ungated_id = _lookup_ungated_id(id_to_label)
     metrics_to_compute = parse_metric_argument(args.metric)
 
+    warn_state = {"synthetic_ungated": False}
     results = {}
     for run_name, predictions in predicted_runs.items():
         per_sample_predictions = None
         if predicted_samples and run_name in predicted_samples:
-            per_sample_predictions, predictions = _align_predictions_to_truth(
+            per_sample_predictions, predictions, ungated_id = _align_predictions_to_truth(
                 truth_by_sample,
                 truth_sample_order,
                 predicted_samples[run_name],
                 run_name,
                 ungated_id=ungated_id,
+                warn_state=warn_state,
             )
         else:
             per_sample_predictions = _split_predictions_by_truth(
@@ -840,9 +869,17 @@ def main():
         if ungated_id is None and per_sample_predictions:
             missing = any(len(values) == 0 for values in per_sample_predictions.values())
             if missing:
-                raise ValueError(
-                    "Empty prediction file and no 'Ungated' label id available."
-                )
+                ungated_id = _synthesize_ungated_id(truth)
+                if ungated_id is None:
+                    raise ValueError(
+                        "Empty prediction file and no 'Ungated' label id available."
+                    )
+                if not warn_state.get("synthetic_ungated"):
+                    print(
+                        "Warning: empty prediction file; using synthetic 'Ungated' label for metrics only.",
+                        file=sys.stderr,
+                    )
+                    warn_state["synthetic_ungated"] = True
 
         if per_sample_predictions:
             per_sample_predictions = {
