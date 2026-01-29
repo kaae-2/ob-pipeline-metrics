@@ -20,9 +20,28 @@ if [[ ! -f "$label_key_dest" ]]; then
   done
 fi
 
-"${python_bin}" "${script_dir}/flow_metrics.py" \
-  --name "dgcytof" \
-  --output_dir "${script_dir}/out/data/metrics/all/flow_metrics" \
-  --analysis.prediction "${script_dir}/out/data/analysis/default/dgcytof/dgcytof_predicted_labels.tar.gz" \
-  --data.true_labels "${script_dir}/out/data/data_preprocessing/default/data_import.test.labels.tar.gz" \
+data_order_path="${script_dir}/out/data/data_import/default/data_import.order.json.gz"
+if [[ ! -f "$data_order_path" ]]; then
+  for candidate in \
+    "${script_dir}/../data/out/data/data_import/default/data_import.order.json.gz" \
+    "${script_dir}/../preprocessing/out/data/data_import/preprocessing/data_preprocessing/default/data_import.order.json.gz"; do
+    if [[ -f "$candidate" ]]; then
+      data_order_path="$candidate"
+      break
+    fi
+  done
+fi
+
+args=(
+  --name "dgcytof"
+  --output_dir "${script_dir}/out/data/metrics/all/flow_metrics"
+  --analysis.prediction "${script_dir}/out/data/analysis/default/dgcytof/dgcytof_predicted_labels.tar.gz"
+  --data.true_labels "${script_dir}/out/data/data_preprocessing/default/data_import.test.labels.tar.gz"
   --metric "all"
+)
+
+if [[ -f "$data_order_path" ]]; then
+  args+=(--data.order "$data_order_path")
+fi
+
+"${python_bin}" "${script_dir}/flow_metrics.py" "${args[@]}"

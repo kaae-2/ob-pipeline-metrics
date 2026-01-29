@@ -67,6 +67,28 @@ CLASSIFICATION_METRICS = {
 }
 
 
+def _read_json_maybe_gzip(path):
+    opener = gzip.open if path.endswith(".gz") else open
+    with opener(path, "rt") as handle:
+        return json.load(handle)
+
+
+def _load_dataset_metadata(order_path):
+    if not order_path:
+        return None
+    try:
+        payload = _read_json_maybe_gzip(order_path)
+    except Exception as exc:
+        print(f"Warning: failed to read data.order metadata: {exc}", file=sys.stderr)
+        return None
+    if not isinstance(payload, dict):
+        return None
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    return metadata
+
+
 def _read_first_line(path):
     """Read the first line of a (possibly gzipped) file."""
     opener = gzip.open if path.endswith(".gz") else open
@@ -559,7 +581,7 @@ def compute_per_population_stats(y_true, y_pred, id_to_label=None):
             "tn": int(tn),
             "scaling_rate": pop_scaling_rate,
             "support": int(pop_size),
-            "n": int(pop_size),
+            "n_cells": int(pop_size),
             "population_name": label_lookup.get(str(label)),
         }
     return per_population
@@ -734,7 +756,7 @@ def compute_prediction_metrics(y_true, y_pred, metrics_to_compute, id_to_label=N
         raise ValueError("Predicted labels and true labels must align in length.")
 
     results = {}
-    results["n"] = int(y_true.size)
+    results["n_cells"] = int(y_true.size)
 
     # Base stats computed once for classification-style metrics
     if any(metric in CLASSIFICATION_METRICS for metric in metrics_to_compute):
@@ -815,6 +837,11 @@ def main():
         "--data.label_key",
         type=str,
         help="label key mapping file (optional)",
+    )
+    parser.add_argument(
+        "--data.order",
+        type=str,
+        help="order JSON file (optional; may include metadata)",
     )
     parser.add_argument(
         "--output_dir",
@@ -933,6 +960,9 @@ def main():
         "metrics_requested": metrics_to_compute,
         "results": results,
     }
+    dataset_metadata = _load_dataset_metadata(getattr(args, "data.order", None))
+    if dataset_metadata is not None:
+        payload["dataset_metadata"] = dataset_metadata
 
     if args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)
