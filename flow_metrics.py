@@ -25,6 +25,7 @@ metric computation itself, not the upstream model execution.
 """
 
 import argparse
+import csv
 import gzip
 import io
 import json
@@ -37,6 +38,7 @@ from glob import glob
 
 import numpy as np
 import pandas as pd
+from pandas import Series
 
 VALID_METRICS = {
     "accuracy",
@@ -522,6 +524,32 @@ def _nan_safe_mean(values):
     return float(np.mean(vals)) if vals else float("nan")
 
 
+def _count_populations(values):
+    series: Series = pd.Series(np.ravel(values))
+    series = series.dropna()
+    if series.empty:
+        return 0
+    return int(series.nunique())
+
+
+def _write_sample_stats_tsv(path, truth_by_sample, sample_order):
+    order = sample_order or sorted(truth_by_sample)
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, delimiter="\t")
+        writer.writerow(["sample_name", "n_cells", "n_populations"])
+        for sample_id in order:
+            values = truth_by_sample.get(sample_id)
+            if values is None:
+                continue
+            writer.writerow(
+                [
+                    sample_id,
+                    int(len(values)),
+                    _count_populations(values),
+                ]
+            )
+
+
 def strip_noise_labels(y_true, y_pred):
     y_true = np.array(y_true, ndmin=1)
     y_pred = np.array(y_pred, ndmin=1)
@@ -963,6 +991,9 @@ def main():
     dataset_metadata = _load_dataset_metadata(getattr(args, "data.order", None))
     if dataset_metadata is not None:
         payload["dataset_metadata"] = dataset_metadata
+        n_variables = dataset_metadata.get("n_variables")
+        if n_variables is not None:
+            payload["n_variables"] = n_variables
 
     if args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)
@@ -970,6 +1001,9 @@ def main():
         with gzip.open(out_path, "wt") as fh:
             json.dump(payload, fh, indent=2)
         print(f"Saved metrics to {out_path}")
+        tsv_path = os.path.join(args.output_dir, f"{args.name}.sample_stats.tsv")
+        _write_sample_stats_tsv(tsv_path, truth_by_sample, truth_sample_order)
+        print(f"Saved sample stats to {tsv_path}")
     else:
         print(json.dumps(payload, indent=2))
 
