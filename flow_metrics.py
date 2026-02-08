@@ -297,14 +297,11 @@ def _load_predictions_from_tar(path):
                 series = pd.Series([], dtype=float)
             else:
                 try:
-                    series = pd.read_csv(
-                        io.BytesIO(content),
-                        header=None,
-                        comment="#",
-                        na_values=["", '""', "nan", "NaN"],
-                        skip_blank_lines=False,
-                    ).iloc[:, 0]
-                except pd.errors.EmptyDataError:
+                    _, values = _parse_prediction_content(
+                        content.decode("utf-8", errors="replace")
+                    )
+                    series = pd.Series(values[:, 0])
+                except (pd.errors.EmptyDataError, ValueError):
                     series = pd.Series([], dtype=float)
             predictions.append(series)
             sample_id = member.name
