@@ -877,7 +877,7 @@ def main():
     parser.add_argument(
         "--metric",
         type=str,
-        required=True,
+        default="all",
         help="comma-separated metrics to compute (or 'all')",
     )
 
