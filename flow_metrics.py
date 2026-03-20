@@ -771,17 +771,26 @@ def compute_prediction_metrics(y_true, y_pred, metrics_to_compute, id_to_label=N
     """
     start = time.perf_counter()
 
+    y_true = np.atleast_1d(y_true)
+    y_pred = np.atleast_1d(y_pred)
+
+    if y_true.shape[0] != y_pred.shape[0]:
+        raise ValueError("Predicted labels and true labels must align in length.")
+
+    # Keep the raw input size for auditability; filtered/evaluated counts can
+    # differ after noise-label/NaN filtering below.
+    n_cells_total = int(y_true.size)
+
     y_true, y_pred = strip_noise_labels(y_true, y_pred)
 
     valid_mask = (~pd.isna(y_true)) & (~pd.isna(y_pred))
     y_true = y_true[valid_mask]
     y_pred = y_pred[valid_mask]
 
-    if y_true.shape[0] != y_pred.shape[0]:
-        raise ValueError("Predicted labels and true labels must align in length.")
-
     results = {}
+    results["n_cells_total"] = int(n_cells_total)
     results["n_cells"] = int(y_true.size)
+    results["n"] = results["n_cells"]
 
     # Base stats computed once for classification-style metrics
     if any(metric in CLASSIFICATION_METRICS for metric in metrics_to_compute):
