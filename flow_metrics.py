@@ -98,6 +98,44 @@ def _read_first_line(path):
         return handle.readline()
 
 
+def _parse_label_content(content):
+    lines = content.splitlines()
+    first_line = lines[0] if lines else ""
+    has_header = _has_header(first_line)
+    if not has_header:
+        first_token = first_line.strip().lower()
+        if first_token in {
+            "label",
+            "labels",
+            "population",
+            "cell_type",
+            "celltype",
+            "cluster",
+            "cluster_id",
+        }:
+            has_header = True
+
+    def _read_with_sep(sep, text):
+        return pd.read_csv(
+            io.StringIO(text),
+            sep=sep,
+            engine="python",
+            header=0 if has_header else None,
+            comment="#",
+            na_values=["", '""', "nan", "NaN"],
+            skip_blank_lines=False,
+        )
+
+    try:
+        df = _read_with_sep(",", content)
+    except pd.errors.ParserError:
+        df = _read_with_sep(r"\s+", content)
+
+    if df.empty:
+        return pd.Series([], dtype=float)
+    return df.iloc[:, 0]
+
+
 def _has_header(first_line):
     """Heuristically decide whether the first line is a header row.
 
@@ -134,18 +172,9 @@ def load_true_labels_with_samples(data_file):
     if tarfile.is_tarfile(data_file):
         return _load_true_labels_from_tar(data_file)
 
-    first_line = _read_first_line(data_file)
-    has_header = _has_header(first_line)
-
     opener = gzip.open if data_file.endswith(".gz") else open
     with opener(data_file, "rt") as handle:
-        series = pd.read_csv(
-            handle,
-            header=0 if has_header else None,
-            comment="#",
-            na_values=["", '""', "nan", "NaN"],
-            skip_blank_lines=False,
-        ).iloc[:, 0]
+        series = _parse_label_content(handle.read())
 
     try:
         labels = series.to_numpy()
@@ -162,7 +191,7 @@ def _load_true_labels_from_tar(data_file):
     labels_list = []
     labels_by_sample = {}
     sample_order = []
-    with tarfile.open(data_file, "r:gz") as tar:
+    with tarfile.open(data_file, "r:*") as tar:
         members = [m for m in tar.getmembers() if m.isfile()]
         for member in members:
             file_obj = tar.extractfile(member)
@@ -171,13 +200,13 @@ def _load_true_labels_from_tar(data_file):
             content = file_obj.read()
             if member.name.endswith(".gz"):
                 content = gzip.decompress(content)
-            series = pd.read_csv(
-                io.BytesIO(content),
-                header=None,
-                comment="#",
-                na_values=["", '""', "nan", "NaN"],
-                skip_blank_lines=False,
-            ).iloc[:, 0]
+            if not content or content.strip() == b"":
+                series = pd.Series([], dtype=float)
+            else:
+                try:
+                    series = _parse_label_content(content.decode("utf-8", errors="replace"))
+                except (pd.errors.EmptyDataError, ValueError):
+                    series = pd.Series([], dtype=float)
             labels_list.append(series)
             sample_id = member.name
             labels_by_sample[sample_id] = series.to_numpy()
