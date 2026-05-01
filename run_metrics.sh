@@ -6,27 +6,14 @@ script_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
 python_bin="${script_dir}/.venv/bin/python"
 [ -x "$python_bin" ] || python_bin="python"
 
-labels_dir="${script_dir}/out/data/data_preprocessing/default"
-label_key_dest="${labels_dir}/data_import.label_key.json.gz"
-if [[ ! -f "$label_key_dest" ]]; then
+data_metadata_path="${script_dir}/out/data/data_import/default/data_import.metadata.json.gz"
+if [[ ! -f "$data_metadata_path" ]]; then
   for candidate in \
-    "${script_dir}/../preprocessing/out/data/data_import/preprocessing/data_preprocessing/default/data_import.label_key.json.gz" \
-    "${script_dir}/../models/dgcytof/out/data/data_preprocessing/default/data_import.label_key.json.gz"; do
+    "${script_dir}/../data/out/data/data_import/default/data_import.metadata.json.gz" \
+    "${script_dir}/../preprocessing/out/data/data_import/preprocessing/data_preprocessing/default/data_import.metadata.json.gz" \
+    "${script_dir}/../stratify/out/data/data_import/preprocessing/data_preprocessing/stratify/data_stratify/default/data_import.metadata.json.gz"; do
     if [[ -f "$candidate" ]]; then
-      mkdir -p "$labels_dir"
-      ln -sfn "$candidate" "$label_key_dest"
-      break
-    fi
-  done
-fi
-
-data_order_path="${script_dir}/out/data/data_import/default/data_import.order.json.gz"
-if [[ ! -f "$data_order_path" ]]; then
-  for candidate in \
-    "${script_dir}/../data/out/data/data_import/default/data_import.order.json.gz" \
-    "${script_dir}/../preprocessing/out/data/data_import/preprocessing/data_preprocessing/default/data_import.order.json.gz"; do
-    if [[ -f "$candidate" ]]; then
-      data_order_path="$candidate"
+      data_metadata_path="$candidate"
       break
     fi
   done
@@ -40,8 +27,8 @@ args=(
   --metric "all"
 )
 
-if [[ -f "$data_order_path" ]]; then
-  args+=(--data.order "$data_order_path")
+if [[ -f "$data_metadata_path" ]]; then
+  args+=(--data.metadata "$data_metadata_path")
 fi
 
 "${python_bin}" "${script_dir}/flow_metrics.py" "${args[@]}"

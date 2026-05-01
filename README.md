@@ -35,5 +35,5 @@ just benchmark
 
 - Prediction tarball from a model under `metrics/out/data/analysis/...`
 - True-label tarball under `metrics/out/data/data_preprocessing/...`
-- Optional `data_import.order.json.gz` for wrapped-fold dedup metadata
+- Optional `data_import.metadata.json.gz` for wrapped-fold dedup metadata
 - Python environment for `flow_metrics.py`

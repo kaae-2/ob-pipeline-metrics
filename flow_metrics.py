@@ -75,20 +75,29 @@ def _read_json_maybe_gzip(path):
         return json.load(handle)
 
 
-def _load_dataset_metadata(order_path):
-    if not order_path:
+def _load_metadata_payload(metadata_path):
+    if not metadata_path:
         return None
     try:
-        payload = _read_json_maybe_gzip(order_path)
+        payload = _read_json_maybe_gzip(metadata_path)
     except Exception as exc:
-        print(f"Warning: failed to read data.order metadata: {exc}", file=sys.stderr)
+        print(f"Warning: failed to read data.metadata payload: {exc}", file=sys.stderr)
         return None
     if not isinstance(payload, dict):
         return None
-    metadata = payload.get("metadata")
-    if not isinstance(metadata, dict):
+    return payload
+
+
+def _load_dataset_metadata(metadata_payload):
+    if not isinstance(metadata_payload, dict):
         return None
-    return metadata
+    dataset = metadata_payload.get("dataset")
+    if isinstance(dataset, dict):
+        return dataset
+    metadata = metadata_payload.get("metadata")
+    if isinstance(metadata, dict):
+        return metadata
+    return None
 
 
 def _read_first_line(path):
@@ -452,15 +461,14 @@ def _align_predictions_to_truth(
     return aligned_predictions, np.concatenate(aligned_concat), effective_ungated_id
 
 
-def _read_label_key(path):
-    if not path or not os.path.exists(path):
+def _read_id_to_label(metadata_payload):
+    if not isinstance(metadata_payload, dict):
         return {}
-    opener = gzip.open if path.endswith(".gz") else open
-    with opener(path, "rt") as handle:
-        payload = json.load(handle)
-    if not isinstance(payload, dict):
-        return {}
-    id_to_label = payload.get("id_to_label")
+    labels = metadata_payload.get("labels")
+    if isinstance(labels, dict):
+        id_to_label = labels.get("id_to_label")
+    else:
+        id_to_label = metadata_payload.get("id_to_label")
     if not isinstance(id_to_label, dict):
         return {}
     return {str(key): str(value) for key, value in id_to_label.items()}
@@ -502,9 +510,9 @@ def _fill_missing_predictions(values, replacement):
     return filled
 
 
-def _infer_label_key_path(true_labels_path, name):
+def _infer_metadata_path(true_labels_path, name):
     directory = os.path.dirname(true_labels_path)
-    candidate = os.path.join(directory, f"{name}.label_key.json.gz")
+    candidate = os.path.join(directory, f"{name}.metadata.json.gz")
     if os.path.exists(candidate):
         return candidate
 
@@ -519,12 +527,12 @@ def _infer_label_key_path(true_labels_path, name):
     for suffix in suffixes:
         if filename.endswith(suffix):
             base = filename[: -len(suffix)]
-            candidate = os.path.join(directory, f"{base}.label_key.json.gz")
+            candidate = os.path.join(directory, f"{base}.metadata.json.gz")
             if os.path.exists(candidate):
                 return candidate
             break
 
-    candidates = glob(os.path.join(directory, "*.label_key.json.gz"))
+    candidates = glob(os.path.join(directory, "*.metadata.json.gz"))
     if len(candidates) == 1:
         return candidates[0]
     return None
@@ -897,14 +905,9 @@ def main():
         help="text file containing the true labels (1D)",
     )
     parser.add_argument(
-        "--data.label_key",
+        "--data.metadata",
         type=str,
-        help="label key mapping file (optional)",
-    )
-    parser.add_argument(
-        "--data.order",
-        type=str,
-        help="order JSON file (optional; may include metadata)",
+        help="metadata JSON.gz file containing label mappings and dataset context",
     )
     parser.add_argument(
         "--output_dir",
@@ -931,10 +934,11 @@ def main():
     predicted_runs, predicted_samples, _ = load_predicted_runs(
         getattr(args, "analysis.prediction")
     )
-    label_key_path = getattr(args, "data.label_key") or _infer_label_key_path(
+    metadata_path = getattr(args, "data.metadata", None) or _infer_metadata_path(
         getattr(args, "data.true_labels"), args.name
     )
-    id_to_label = _read_label_key(label_key_path)
+    metadata_payload = _load_metadata_payload(metadata_path)
+    id_to_label = _read_id_to_label(metadata_payload)
     ungated_id = _lookup_ungated_id(id_to_label)
     metrics_to_compute = parse_metric_argument(args.metric)
 
@@ -1023,12 +1027,14 @@ def main():
         "metrics_requested": metrics_to_compute,
         "results": results,
     }
-    dataset_metadata = _load_dataset_metadata(getattr(args, "data.order", None))
+    dataset_metadata = _load_dataset_metadata(metadata_payload)
     if dataset_metadata is not None:
         payload["dataset_metadata"] = dataset_metadata
         n_variables = dataset_metadata.get("n_variables")
         if n_variables is not None:
             payload["n_variables"] = n_variables
+    if metadata_payload is not None:
+        payload["data_metadata"] = metadata_payload
 
     if args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)
