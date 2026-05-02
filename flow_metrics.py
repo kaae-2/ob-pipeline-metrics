@@ -381,12 +381,10 @@ def _split_predictions_by_truth(predictions, truth_by_sample, sample_order):
 
 def _sample_key_from_name(name):
     base = os.path.basename(name)
-    while True:
-        root, ext = os.path.splitext(base)
-        if ext in {".gz", ".csv", ".txt"}:
-            base = root
-            continue
-        break
+    for suffix in (".csv.gz", ".labels.gz", ".label.gz", ".txt.gz", ".csv", ".txt", ".gz"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+            break
     matches = re.findall(r"\d+", base)
     if matches:
         return matches[-1]
