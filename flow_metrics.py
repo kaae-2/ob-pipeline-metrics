@@ -14,6 +14,7 @@ Inputs mirror run_metrics:
 
 Metrics implemented (selected via --metric):
 - accuracy, precision, recall/sensitivity, f1 (per-population with macro averages)
+- balanced_accuracy (mean recall across populations present in the truth labels)
 - mcc (multi-class extension), pop_freq_corr (frequency correlation),
   scaling_rate (per-pop accuracy divided by pop size)
 - runtime: time spent computing the metrics for that run
@@ -45,6 +46,7 @@ VALID_METRICS = {
     "precision",
     "recall",
     "sensitivity",
+    "balanced_accuracy",
     "f1",
     "f1_score",
     "mcc",
@@ -62,6 +64,7 @@ CLASSIFICATION_METRICS = {
     "precision",
     "recall",
     "sensitivity",
+    "balanced_accuracy",
     "f1",
     "mcc",
     "pop_freq_corr",
@@ -488,24 +491,7 @@ def _synthesize_ungated_id(truth_values):
     truth_numeric = truth_numeric[~np.isnan(truth_numeric)]
     if truth_numeric.size == 0:
         return None
-    try:
-        max_value = int(np.max(truth_numeric))
-    except (ValueError, TypeError):
-        return None
-    return max_value + 1
-
-
-def _fill_missing_predictions(values, replacement):
-    if replacement is None:
-        return values
-    if values.size == 0:
-        return values
-    mask = pd.isna(values)
-    if not np.any(mask):
-        return values
-    filled = values.copy()
-    filled[mask] = replacement
-    return filled
+    return 0
 
 
 def _infer_metadata_path(true_labels_path, name):
@@ -614,14 +600,10 @@ def compute_per_population_stats(y_true, y_pred, id_to_label=None):
         tn = total - tp - fp - fn
 
         pop_accuracy = float(correct / pop_size) if pop_size else float("nan")
-        pop_precision = float(tp / (tp + fp)) if (tp + fp) else float("nan")
+        pop_precision = float(tp / (tp + fp)) if (tp + fp) else 0.0
         pop_recall = float(tp / (tp + fn)) if (tp + fn) else float("nan")
-        if (
-            np.isnan(pop_precision)
-            or np.isnan(pop_recall)
-            or (pop_precision + pop_recall) == 0
-        ):
-            pop_f1 = float("nan")
+        if np.isnan(pop_recall) or (pop_precision + pop_recall) == 0:
+            pop_f1 = 0.0
         else:
             pop_f1 = float(
                 2 * pop_precision * pop_recall / (pop_precision + pop_recall)
@@ -730,6 +712,10 @@ def metric_sensitivity(base_stats):
     return {"sensitivity_macro": base_stats["macro_recall"]}
 
 
+def metric_balanced_accuracy(base_stats):
+    return {"balanced_accuracy": base_stats["macro_recall"]}
+
+
 def metric_f1(base_stats):
     return {"f1_macro": base_stats["macro_f1"]}
 
@@ -752,6 +738,7 @@ def warn_missing_metrics(run_name, metrics_to_compute, results):
         "precision": ["precision_macro"],
         "recall": ["recall_macro"],
         "sensitivity": ["sensitivity_macro"],
+        "balanced_accuracy": ["balanced_accuracy"],
         "f1": ["f1_macro"],
         "mcc": ["mcc"],
         "pop_freq_corr": ["pop_freq_corr"],
@@ -815,17 +802,40 @@ def compute_prediction_metrics(y_true, y_pred, metrics_to_compute, id_to_label=N
     # Keep the raw input size for auditability; filtered/evaluated counts can
     # differ after noise-label/NaN filtering below.
     n_cells_total = int(y_true.size)
+    true_numeric = np.asarray(pd.to_numeric(y_true, errors="coerce"))
+    pred_numeric = np.asarray(pd.to_numeric(y_pred, errors="coerce"))
+    truth_positive = np.isfinite(true_numeric) & (true_numeric > 0)
+    truth_zero = np.isfinite(true_numeric) & (true_numeric <= 0)
+    prediction_missing = pd.isna(pred_numeric)
+    prediction_zero = (pred_numeric == 0) | prediction_missing
+    n_truth_positive = int(truth_positive.sum())
 
     y_true, y_pred = strip_noise_labels(y_true, y_pred)
 
-    valid_mask = (~pd.isna(y_true)) & (~pd.isna(y_pred))
+    valid_mask = ~pd.isna(y_true)
     y_true = y_true[valid_mask]
     y_pred = y_pred[valid_mask]
+    y_pred = np.asarray(y_pred)
+    y_pred[pd.isna(y_pred)] = 0
 
     results = {}
     results["n_cells_total"] = int(n_cells_total)
     results["n_cells"] = int(y_true.size)
     results["n"] = results["n_cells"]
+    results["n_truth_positive"] = n_truth_positive
+    results["n_truth_zero"] = int(truth_zero.sum())
+    results["n_pred_zero_on_truth_positive"] = int(
+        (prediction_zero & truth_positive).sum()
+    )
+    results["rejection_rate_on_truth_positive"] = (
+        results["n_pred_zero_on_truth_positive"] / n_truth_positive
+        if n_truth_positive
+        else float("nan")
+    )
+    results["n_pred_zero_on_truth_zero"] = int((prediction_zero & truth_zero).sum())
+    results["n_pred_missing_mapped_to_zero"] = int(
+        (prediction_missing & truth_positive).sum()
+    )
 
     # Base stats computed once for classification-style metrics
     if any(metric in CLASSIFICATION_METRICS for metric in metrics_to_compute):
@@ -863,6 +873,7 @@ def compute_prediction_metrics(y_true, y_pred, metrics_to_compute, id_to_label=N
             "precision": lambda: metric_precision(base_stats),
             "recall": lambda: metric_recall(base_stats),
             "sensitivity": lambda: metric_sensitivity(base_stats),
+            "balanced_accuracy": lambda: metric_balanced_accuracy(base_stats),
             "f1": lambda: metric_f1(base_stats),
             "mcc": lambda: metric_mcc(mcc_value),
             "pop_freq_corr": lambda: metric_pop_freq_corr(pop_freq_corr),
@@ -972,13 +983,6 @@ def main():
                         file=sys.stderr,
                     )
                     warn_state["synthetic_ungated"] = True
-
-        if per_sample_predictions:
-            per_sample_predictions = {
-                key: _fill_missing_predictions(values, ungated_id)
-                for key, values in per_sample_predictions.items()
-            }
-        predictions = _fill_missing_predictions(predictions, ungated_id)
 
         if predictions.shape[0] != truth.shape[0]:
             raise ValueError(
