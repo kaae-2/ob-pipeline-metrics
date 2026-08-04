@@ -956,6 +956,12 @@ def compute_prediction_metrics(
     return results
 
 
+def predictions_are_all_missing(predictions):
+    """Return whether a non-empty prediction vector contains only missing values."""
+    predictions = np.atleast_1d(predictions)
+    return predictions.size > 0 and bool(np.all(pd.isna(predictions)))
+
+
 def main():
     parser = argparse.ArgumentParser(description="Flow prediction metrics runner")
 
@@ -1047,6 +1053,18 @@ def main():
             raise ValueError(
                 f"Predicted labels rows ({predictions.shape[0]}) do not match true labels ({truth.shape[0]}) for run '{run_name}'."
             )
+
+        if predictions_are_all_missing(predictions):
+            results[str(run_name)] = {
+                "status": "not_run",
+                "reason": "all_predictions_missing",
+                "n_cells_total": int(truth.size),
+                "n_cells": 0,
+                "n": 0,
+                "per_population": {},
+                "per_sample": {},
+            }
+            continue
 
         metrics_for_run = compute_prediction_metrics(
             truth,

@@ -82,6 +82,19 @@ class FlowMetricsTests(unittest.TestCase):
         self.assertEqual(result['n_pred_missing_mapped_to_zero'], 1)
         self.assertEqual(result['rejection_rate_on_truth_positive'], 0.5)
 
+    def test_all_missing_predictions_are_recognized_as_not_run(self):
+        self.assertTrue(
+            flow_metrics.predictions_are_all_missing(
+                np.array([np.nan, np.nan]),
+            )
+        )
+        self.assertFalse(
+            flow_metrics.predictions_are_all_missing(
+                np.array([np.nan, 1]),
+            )
+        )
+        self.assertFalse(flow_metrics.predictions_are_all_missing(np.array([])))
+
 
 if __name__ == '__main__':
     unittest.main()
