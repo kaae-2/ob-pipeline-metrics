@@ -103,6 +103,42 @@ def _load_dataset_metadata(metadata_payload):
     return None
 
 
+def _normalize_population_id(value):
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if np.isfinite(numeric) and numeric.is_integer():
+        return str(int(numeric))
+    return str(value)
+
+
+def _read_training_support_by_label(metadata_payload):
+    if not isinstance(metadata_payload, dict):
+        return None
+    split_audit = metadata_payload.get("split_audit")
+    if not isinstance(split_audit, dict):
+        return None
+    populations = split_audit.get("populations")
+    if not isinstance(populations, list):
+        return None
+
+    training_support = {}
+    for population in populations:
+        if not isinstance(population, dict):
+            continue
+        population_id = population.get("id")
+        support = population.get("training_support")
+        try:
+            support = float(support)
+        except (TypeError, ValueError):
+            continue
+        if population_id is None or not np.isfinite(support) or support < 0:
+            continue
+        training_support[_normalize_population_id(population_id)] = support
+    return training_support
+
+
 def _read_first_line(path):
     """Read the first line of a (possibly gzipped) file."""
     opener = gzip.open if path.endswith(".gz") else open
@@ -585,12 +621,15 @@ def strip_noise_labels(y_true, y_pred):
     return y_true, y_pred
 
 
-def compute_per_population_stats(y_true, y_pred, id_to_label=None):
+def compute_per_population_stats(
+    y_true, y_pred, id_to_label=None, training_support_by_label=None
+):
     per_population = {}
     labels = np.unique(y_true)
     total = y_true.size
     label_lookup = id_to_label or {}
     for label in labels:
+        label_id = _normalize_population_id(label)
         pop_mask = y_true == label
         pop_size = pop_mask.sum()
         correct = (y_pred[pop_mask] == label).sum()
@@ -612,6 +651,16 @@ def compute_per_population_stats(y_true, y_pred, id_to_label=None):
             float(pop_accuracy / pop_size) if pop_size else float("nan")
         )
 
+        if (
+            training_support_by_label is not None
+            and training_support_by_label.get(label_id) == 0
+        ):
+            pop_accuracy = float("nan")
+            pop_precision = float("nan")
+            pop_recall = float("nan")
+            pop_f1 = float("nan")
+            pop_scaling_rate = float("nan")
+
         per_population[str(label)] = {
             "accuracy": pop_accuracy,
             "precision": pop_precision,
@@ -624,7 +673,7 @@ def compute_per_population_stats(y_true, y_pred, id_to_label=None):
             "scaling_rate": pop_scaling_rate,
             "support": int(pop_size),
             "n_cells": int(pop_size),
-            "population_name": label_lookup.get(str(label)),
+            "population_name": label_lookup.get(label_id),
         }
     return per_population
 
@@ -786,7 +835,13 @@ def metric_scalability(runtime_seconds, n_items):
     }
 
 
-def compute_prediction_metrics(y_true, y_pred, metrics_to_compute, id_to_label=None):
+def compute_prediction_metrics(
+    y_true,
+    y_pred,
+    metrics_to_compute,
+    id_to_label=None,
+    training_support_by_label=None,
+):
     """
     Computes per-population metrics and optional runtime/overlap/scalability
     for a single set of predictions.
@@ -840,7 +895,10 @@ def compute_prediction_metrics(y_true, y_pred, metrics_to_compute, id_to_label=N
     # Base stats computed once for classification-style metrics
     if any(metric in CLASSIFICATION_METRICS for metric in metrics_to_compute):
         per_population = compute_per_population_stats(
-            y_true, y_pred, id_to_label=id_to_label
+            y_true,
+            y_pred,
+            id_to_label=id_to_label,
+            training_support_by_label=training_support_by_label,
         )
         (
             macro_precision,
@@ -948,6 +1006,7 @@ def main():
     )
     metadata_payload = _load_metadata_payload(metadata_path)
     id_to_label = _read_id_to_label(metadata_payload)
+    training_support_by_label = _read_training_support_by_label(metadata_payload)
     ungated_id = _lookup_ungated_id(id_to_label)
     metrics_to_compute = parse_metric_argument(args.metric)
 
@@ -990,7 +1049,11 @@ def main():
             )
 
         metrics_for_run = compute_prediction_metrics(
-            truth, predictions, metrics_to_compute, id_to_label=id_to_label
+            truth,
+            predictions,
+            metrics_to_compute,
+            id_to_label=id_to_label,
+            training_support_by_label=training_support_by_label,
         )
 
         per_sample_metrics = {}
@@ -1008,6 +1071,7 @@ def main():
                     sample_pred,
                     metrics_to_compute,
                     id_to_label=id_to_label,
+                    training_support_by_label=training_support_by_label,
                 )
 
         if not per_sample_metrics:
@@ -1017,6 +1081,7 @@ def main():
                     predictions,
                     metrics_to_compute,
                     id_to_label=id_to_label,
+                    training_support_by_label=training_support_by_label,
                 )
             }
 
