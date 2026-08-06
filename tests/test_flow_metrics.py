@@ -35,7 +35,7 @@ class FlowMetricsTests(unittest.TestCase):
         self.assertEqual(result['per_population']['2']['f1'], 0.0)
         self.assertAlmostEqual(result['f1_macro'], 1 / 3)
 
-    def test_population_absent_from_training_has_nan_scores(self):
+    def test_population_absent_from_training_still_contributes_to_metrics(self):
         result = flow_metrics.compute_prediction_metrics(
             np.array([1, 1, 2, 2]),
             np.array([1, 1, 1, 1]),
@@ -45,11 +45,25 @@ class FlowMetricsTests(unittest.TestCase):
 
         absent = result['per_population']['2']
         for metric in ['accuracy', 'precision', 'recall', 'f1', 'scaling_rate']:
-            self.assertTrue(np.isnan(absent[metric]))
+            self.assertEqual(absent[metric], 0.0)
         self.assertEqual(absent['tp'], 0)
         self.assertEqual(absent['fn'], 2)
         self.assertEqual(absent['support'], 2)
-        self.assertAlmostEqual(result['f1_macro'], 2 / 3)
+        self.assertAlmostEqual(result['f1_macro'], 1 / 3)
+
+    def test_population_absent_from_training_uses_actual_predictions(self):
+        result = flow_metrics.compute_prediction_metrics(
+            np.array([1, 1, 2, 2]),
+            np.array([1, 1, 2, 2]),
+            ['f1', 'precision', 'recall'],
+            training_support_by_label={'1': 2, '2': 0},
+        )
+
+        absent = result['per_population']['2']
+        self.assertEqual(absent['precision'], 1.0)
+        self.assertEqual(absent['recall'], 1.0)
+        self.assertEqual(absent['f1'], 1.0)
+        self.assertEqual(result['f1_macro'], 1.0)
 
     def test_training_support_is_read_from_split_audit(self):
         metadata = {

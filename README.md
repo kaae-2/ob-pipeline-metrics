@@ -23,6 +23,15 @@ Or direct CLI:
 python metrics/flow_metrics.py --name dgcytof --output_dir metrics/out/... --analysis.prediction <predictions.tar.gz> --data.true_labels <test.labels.tar.gz> --metric all
 ```
 
+To regenerate artifacts listed in a collector `run-status.tsv`, load each
+shared fold once and process its model predictions as a batch:
+
+```bash
+python metrics/batch_flow_metrics.py --run-status out/metric_collectors/metrics_report/run-status.tsv --stale-only --jobs 4
+```
+
+Omit `--stale-only` to regenerate every listed artifact.
+
 ## Run as part of benchmark
 
 Wired in `benchmark/Clustering_conda.yml` metrics stage; run via:

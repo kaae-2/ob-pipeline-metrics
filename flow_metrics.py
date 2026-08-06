@@ -651,16 +651,6 @@ def compute_per_population_stats(
             float(pop_accuracy / pop_size) if pop_size else float("nan")
         )
 
-        if (
-            training_support_by_label is not None
-            and training_support_by_label.get(label_id) == 0
-        ):
-            pop_accuracy = float("nan")
-            pop_precision = float("nan")
-            pop_recall = float("nan")
-            pop_f1 = float("nan")
-            pop_scaling_rate = float("nan")
-
         per_population[str(label)] = {
             "accuracy": pop_accuracy,
             "precision": pop_precision,
@@ -962,59 +952,20 @@ def predictions_are_all_missing(predictions):
     return predictions.size > 0 and bool(np.all(pd.isna(predictions)))
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Flow prediction metrics runner")
-
-    parser.add_argument(
-        "--analysis.prediction",
-        type=str,
-        required=True,
-        help="csv/txt predictions (optionally gzipped) or a gzipped tar of multiple prediction files",
-    )
-    parser.add_argument(
-        "--data.true_labels",
-        type=str,
-        required=True,
-        help="text file containing the true labels (1D)",
-    )
-    parser.add_argument(
-        "--data.metadata",
-        type=str,
-        help="metadata JSON.gz file containing label mappings and dataset context",
-    )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        help="output directory to store results (prints to stdout if omitted)",
-    )
-    parser.add_argument("--name", type=str, help="name of the dataset", default="flow")
-    parser.add_argument(
-        "--metric",
-        type=str,
-        default="all",
-        help="comma-separated metrics to compute (or 'all')",
-    )
-
-    try:
-        args = parser.parse_args()
-    except SystemExit:
-        parser.print_help()
-        sys.exit(0)
-
-    truth, truth_by_sample, truth_sample_order = load_true_labels_with_samples(
-        getattr(args, "data.true_labels")
-    )
-    predicted_runs, predicted_samples, _ = load_predicted_runs(
-        getattr(args, "analysis.prediction")
-    )
-    metadata_path = getattr(args, "data.metadata", None) or _infer_metadata_path(
-        getattr(args, "data.true_labels"), args.name
-    )
-    metadata_payload = _load_metadata_payload(metadata_path)
+def compute_metrics_payload(
+    prediction_path,
+    truth,
+    truth_by_sample,
+    truth_sample_order,
+    metadata_payload,
+    metrics_to_compute,
+    name,
+):
+    """Compute one metrics payload from truth and metadata already loaded in memory."""
+    predicted_runs, predicted_samples, _ = load_predicted_runs(prediction_path)
     id_to_label = _read_id_to_label(metadata_payload)
     training_support_by_label = _read_training_support_by_label(metadata_payload)
     ungated_id = _lookup_ungated_id(id_to_label)
-    metrics_to_compute = parse_metric_argument(args.metric)
 
     warn_state = {"synthetic_ungated": False}
     results = {}
@@ -1108,7 +1059,7 @@ def main():
         results[str(run_name)] = metrics_for_run
 
     payload = {
-        "name": args.name,
+        "name": name,
         "metrics_requested": metrics_to_compute,
         "results": results,
     }
@@ -1120,15 +1071,88 @@ def main():
             payload["n_variables"] = n_variables
     if metadata_payload is not None:
         payload["data_metadata"] = metadata_payload
+    return payload
+
+
+def write_metrics_outputs(
+    payload, output_dir, name, truth_by_sample, truth_sample_order
+):
+    """Write one metrics JSON and its sample-statistics sidecar."""
+    os.makedirs(output_dir, exist_ok=True)
+    out_path = os.path.join(output_dir, f"{name}.flow_metrics.json.gz")
+    with gzip.open(out_path, "wt") as fh:
+        json.dump(payload, fh, indent=2)
+    tsv_path = os.path.join(output_dir, f"{name}.sample_stats.tsv")
+    _write_sample_stats_tsv(tsv_path, truth_by_sample, truth_sample_order)
+    return out_path, tsv_path
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Flow prediction metrics runner")
+
+    parser.add_argument(
+        "--analysis.prediction",
+        type=str,
+        required=True,
+        help="csv/txt predictions (optionally gzipped) or a gzipped tar of multiple prediction files",
+    )
+    parser.add_argument(
+        "--data.true_labels",
+        type=str,
+        required=True,
+        help="text file containing the true labels (1D)",
+    )
+    parser.add_argument(
+        "--data.metadata",
+        type=str,
+        help="metadata JSON.gz file containing label mappings and dataset context",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        help="output directory to store results (prints to stdout if omitted)",
+    )
+    parser.add_argument("--name", type=str, help="name of the dataset", default="flow")
+    parser.add_argument(
+        "--metric",
+        type=str,
+        default="all",
+        help="comma-separated metrics to compute (or 'all')",
+    )
+
+    try:
+        args = parser.parse_args()
+    except SystemExit:
+        parser.print_help()
+        sys.exit(0)
+
+    truth, truth_by_sample, truth_sample_order = load_true_labels_with_samples(
+        getattr(args, "data.true_labels")
+    )
+    metadata_path = getattr(args, "data.metadata", None) or _infer_metadata_path(
+        getattr(args, "data.true_labels"), args.name
+    )
+    metadata_payload = _load_metadata_payload(metadata_path)
+    metrics_to_compute = parse_metric_argument(args.metric)
+    payload = compute_metrics_payload(
+        getattr(args, "analysis.prediction"),
+        truth,
+        truth_by_sample,
+        truth_sample_order,
+        metadata_payload,
+        metrics_to_compute,
+        args.name,
+    )
 
     if args.output_dir:
-        os.makedirs(args.output_dir, exist_ok=True)
-        out_path = os.path.join(args.output_dir, f"{args.name}.flow_metrics.json.gz")
-        with gzip.open(out_path, "wt") as fh:
-            json.dump(payload, fh, indent=2)
+        out_path, tsv_path = write_metrics_outputs(
+            payload,
+            args.output_dir,
+            args.name,
+            truth_by_sample,
+            truth_sample_order,
+        )
         print(f"Saved metrics to {out_path}")
-        tsv_path = os.path.join(args.output_dir, f"{args.name}.sample_stats.tsv")
-        _write_sample_stats_tsv(tsv_path, truth_by_sample, truth_sample_order)
         print(f"Saved sample stats to {tsv_path}")
     else:
         print(json.dumps(payload, indent=2))
