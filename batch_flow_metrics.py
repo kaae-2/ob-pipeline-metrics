@@ -16,6 +16,8 @@ SCORED_POPULATION_METRICS = (
     "f1",
     "precision",
     "recall",
+    "specificity",
+    "balanced_accuracy",
     "accuracy",
     "scaling_rate",
 )

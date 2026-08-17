@@ -13,15 +13,33 @@ SPEC.loader.exec_module(flow_metrics)
 
 
 class FlowMetricsTests(unittest.TestCase):
-    def test_balanced_accuracy_is_mean_population_recall(self):
+    def test_balanced_accuracy_is_mean_one_vs_rest_balanced_accuracy(self):
         result = flow_metrics.compute_prediction_metrics(
-            np.array([1, 1, 2, 2, 2]),
-            np.array([1, 2, 2, 2, 1]),
+            np.array([1, 1, 2, 2, 3, 3]),
+            np.array([1, 2, 2, 3, 3, 3]),
             ['balanced_accuracy', 'recall'],
         )
 
-        self.assertAlmostEqual(result['balanced_accuracy'], (0.5 + 2 / 3) / 2)
-        self.assertEqual(result['balanced_accuracy'], result['recall_macro'])
+        expected_per_population = {
+            '1': (0.5 + 1.0) / 2,
+            '2': (0.5 + 0.75) / 2,
+            '3': (1.0 + 0.75) / 2,
+        }
+        for population, expected in expected_per_population.items():
+            self.assertAlmostEqual(
+                result['per_population'][population]['specificity'],
+                2 * expected - result['per_population'][population]['recall'],
+            )
+            self.assertAlmostEqual(
+                result['per_population'][population]['balanced_accuracy'],
+                expected,
+            )
+
+        self.assertAlmostEqual(
+            result['balanced_accuracy'],
+            sum(expected_per_population.values()) / len(expected_per_population),
+        )
+        self.assertNotEqual(result['balanced_accuracy'], result['recall_macro'])
 
     def test_completely_missed_population_contributes_zero_f1(self):
         result = flow_metrics.compute_prediction_metrics(

@@ -14,7 +14,7 @@ Inputs mirror run_metrics:
 
 Metrics implemented (selected via --metric):
 - accuracy, precision, recall/sensitivity, f1 (per-population with macro averages)
-- balanced_accuracy (mean recall across populations present in the truth labels)
+- balanced_accuracy (mean one-vs-rest sensitivity/specificity across populations)
 - mcc (multi-class extension), pop_freq_corr (frequency correlation),
   scaling_rate (per-pop accuracy divided by pop size)
 - runtime: time spent computing the metrics for that run
@@ -641,6 +641,12 @@ def compute_per_population_stats(
         pop_accuracy = float(correct / pop_size) if pop_size else float("nan")
         pop_precision = float(tp / (tp + fp)) if (tp + fp) else 0.0
         pop_recall = float(tp / (tp + fn)) if (tp + fn) else float("nan")
+        pop_specificity = float(tn / (tn + fp)) if (tn + fp) else float("nan")
+        pop_balanced_accuracy = (
+            float((pop_recall + pop_specificity) / 2)
+            if not np.isnan(pop_recall) and not np.isnan(pop_specificity)
+            else float("nan")
+        )
         if np.isnan(pop_recall) or (pop_precision + pop_recall) == 0:
             pop_f1 = 0.0
         else:
@@ -655,6 +661,8 @@ def compute_per_population_stats(
             "accuracy": pop_accuracy,
             "precision": pop_precision,
             "recall": pop_recall,
+            "specificity": pop_specificity,
+            "balanced_accuracy": pop_balanced_accuracy,
             "f1": pop_f1,
             "tp": int(tp),
             "fp": int(fp),
@@ -671,12 +679,22 @@ def compute_per_population_stats(
 def compute_macro_scores(per_population):
     macro_precision = _nan_safe_mean([v["precision"] for v in per_population.values()])
     macro_recall = _nan_safe_mean([v["recall"] for v in per_population.values()])
+    macro_balanced_accuracy = _nan_safe_mean(
+        [v["balanced_accuracy"] for v in per_population.values()]
+    )
     macro_f1 = _nan_safe_mean([v["f1"] for v in per_population.values()])
     macro_accuracy = _nan_safe_mean([v["accuracy"] for v in per_population.values()])
     macro_scaling_rate = _nan_safe_mean(
         [v["scaling_rate"] for v in per_population.values()]
     )
-    return macro_precision, macro_recall, macro_f1, macro_accuracy, macro_scaling_rate
+    return (
+        macro_precision,
+        macro_recall,
+        macro_balanced_accuracy,
+        macro_f1,
+        macro_accuracy,
+        macro_scaling_rate,
+    )
 
 
 def compute_confusion_matrix(y_true, y_pred):
@@ -752,7 +770,7 @@ def metric_sensitivity(base_stats):
 
 
 def metric_balanced_accuracy(base_stats):
-    return {"balanced_accuracy": base_stats["macro_recall"]}
+    return {"balanced_accuracy": base_stats["macro_balanced_accuracy"]}
 
 
 def metric_f1(base_stats):
@@ -893,6 +911,7 @@ def compute_prediction_metrics(
         (
             macro_precision,
             macro_recall,
+            macro_balanced_accuracy,
             macro_f1,
             macro_accuracy,
             macro_scaling_rate,
@@ -904,6 +923,7 @@ def compute_prediction_metrics(
             ),
             "macro_precision": macro_precision,
             "macro_recall": macro_recall,
+            "macro_balanced_accuracy": macro_balanced_accuracy,
             "macro_f1": macro_f1,
             "macro_accuracy": macro_accuracy,
             "macro_scaling_rate": macro_scaling_rate,
