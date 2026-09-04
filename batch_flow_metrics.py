@@ -22,6 +22,13 @@ SCORED_POPULATION_METRICS = (
     "scaling_rate",
 )
 
+OPEN_SET_RUN_METRICS = (
+    'f1_macro_known_conditional',
+    'f1_macro_known_open_set',
+    'n_pred_positive_on_truth_zero',
+    'ungated_leakage_rate',
+)
+
 
 def artifact_needs_rerun(path):
     """Return whether a completed artifact has a non-finite truth-present score."""
@@ -29,6 +36,8 @@ def artifact_needs_rerun(path):
     for run in payload.get("results", {}).values():
         if run.get("status", "completed") != "completed":
             continue
+        if any(metric not in run for metric in OPEN_SET_RUN_METRICS):
+            return True
         for population in run.get("per_population", {}).values():
             if population.get("support", 0) <= 0:
                 continue

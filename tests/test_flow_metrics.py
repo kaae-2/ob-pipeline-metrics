@@ -114,6 +114,32 @@ class FlowMetricsTests(unittest.TestCase):
         self.assertEqual(result['n_pred_missing_mapped_to_zero'], 1)
         self.assertEqual(result['rejection_rate_on_truth_positive'], 0.5)
 
+    def test_open_set_f1_counts_known_predictions_on_ungated_truth_as_false_positives(self):
+        result = flow_metrics.compute_prediction_metrics(
+            np.array([0, 0, 1, 1, 2, 2]),
+            np.array([1, 0, 1, 2, 2, 0]),
+            ['f1'],
+        )
+
+        self.assertAlmostEqual(result['f1_macro'], 7 / 12)
+        self.assertAlmostEqual(result['f1_macro_known_conditional'], 7 / 12)
+        self.assertEqual(result['f1_macro_known_open_set'], 0.5)
+        self.assertEqual(result['n_pred_positive_on_truth_zero'], 1)
+        self.assertEqual(result['ungated_leakage_rate'], 0.5)
+
+    def test_open_set_f1_equals_conditional_f1_without_ungated_truth(self):
+        result = flow_metrics.compute_prediction_metrics(
+            np.array([1, 1, 2, 2]),
+            np.array([1, 2, 2, 0]),
+            ['f1'],
+        )
+
+        self.assertEqual(
+            result['f1_macro_known_open_set'],
+            result['f1_macro_known_conditional'],
+        )
+        self.assertTrue(np.isnan(result['ungated_leakage_rate']))
+
     def test_all_missing_predictions_are_recognized_as_not_run(self):
         self.assertTrue(
             flow_metrics.predictions_are_all_missing(

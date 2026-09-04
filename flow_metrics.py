@@ -622,10 +622,14 @@ def strip_noise_labels(y_true, y_pred):
 
 
 def compute_per_population_stats(
-    y_true, y_pred, id_to_label=None, training_support_by_label=None
+    y_true,
+    y_pred,
+    id_to_label=None,
+    training_support_by_label=None,
+    labels=None,
 ):
     per_population = {}
-    labels = np.unique(y_true)
+    labels = np.unique(y_true) if labels is None else np.asarray(labels)
     total = y_true.size
     label_lookup = id_to_label or {}
     for label in labels:
@@ -774,7 +778,11 @@ def metric_balanced_accuracy(base_stats):
 
 
 def metric_f1(base_stats):
-    return {"f1_macro": base_stats["macro_f1"]}
+    return {
+        "f1_macro": base_stats["macro_f1"],
+        "f1_macro_known_conditional": base_stats["macro_f1"],
+        "f1_macro_known_open_set": base_stats["macro_f1_known_open_set"],
+    }
 
 
 def metric_mcc(mcc_value):
@@ -871,7 +879,14 @@ def compute_prediction_metrics(
     truth_zero = np.isfinite(true_numeric) & (true_numeric <= 0)
     prediction_missing = pd.isna(pred_numeric)
     prediction_zero = (pred_numeric == 0) | prediction_missing
+    prediction_positive = np.isfinite(pred_numeric) & (pred_numeric > 0)
     n_truth_positive = int(truth_positive.sum())
+    n_truth_zero = int(truth_zero.sum())
+
+    open_set_true = true_numeric[np.isfinite(true_numeric)]
+    open_set_pred = pred_numeric[np.isfinite(true_numeric)].copy()
+    open_set_pred[pd.isna(open_set_pred)] = 0
+    known_labels = np.unique(open_set_true[open_set_true > 0])
 
     y_true, y_pred = strip_noise_labels(y_true, y_pred)
 
@@ -886,7 +901,7 @@ def compute_prediction_metrics(
     results["n_cells"] = int(y_true.size)
     results["n"] = results["n_cells"]
     results["n_truth_positive"] = n_truth_positive
-    results["n_truth_zero"] = int(truth_zero.sum())
+    results["n_truth_zero"] = n_truth_zero
     results["n_pred_zero_on_truth_positive"] = int(
         (prediction_zero & truth_positive).sum()
     )
@@ -896,6 +911,14 @@ def compute_prediction_metrics(
         else float("nan")
     )
     results["n_pred_zero_on_truth_zero"] = int((prediction_zero & truth_zero).sum())
+    results["n_pred_positive_on_truth_zero"] = int(
+        (prediction_positive & truth_zero).sum()
+    )
+    results["ungated_leakage_rate"] = (
+        results["n_pred_positive_on_truth_zero"] / n_truth_zero
+        if n_truth_zero
+        else float("nan")
+    )
     results["n_pred_missing_mapped_to_zero"] = int(
         (prediction_missing & truth_positive).sum()
     )
@@ -916,6 +939,16 @@ def compute_prediction_metrics(
             macro_accuracy,
             macro_scaling_rate,
         ) = compute_macro_scores(per_population)
+        per_population_known_open_set = compute_per_population_stats(
+            open_set_true,
+            open_set_pred,
+            id_to_label=id_to_label,
+            training_support_by_label=training_support_by_label,
+            labels=known_labels,
+        )
+        macro_f1_known_open_set = compute_macro_scores(
+            per_population_known_open_set
+        )[3]
         base_stats = {
             "per_population": per_population,
             "overall_accuracy": (
@@ -925,6 +958,7 @@ def compute_prediction_metrics(
             "macro_recall": macro_recall,
             "macro_balanced_accuracy": macro_balanced_accuracy,
             "macro_f1": macro_f1,
+            "macro_f1_known_open_set": macro_f1_known_open_set,
             "macro_accuracy": macro_accuracy,
             "macro_scaling_rate": macro_scaling_rate,
         }

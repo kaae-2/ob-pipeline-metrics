@@ -13,6 +13,30 @@ finally:
 
 
 class BatchFlowMetricsTests(unittest.TestCase):
+    def test_artifact_without_open_set_metrics_needs_rerun(self):
+        population = {
+            'support': 2,
+            'f1': 1.0,
+            'precision': 1.0,
+            'recall': 1.0,
+            'specificity': 1.0,
+            'balanced_accuracy': 1.0,
+            'accuracy': 1.0,
+            'scaling_rate': 0.5,
+        }
+        payload = {
+            'results': {
+                'run0': {'per_population': {'1': population, '2': population.copy()}},
+            },
+        }
+
+        with patch.object(
+            batch_flow_metrics.flow_metrics,
+            '_read_json_maybe_gzip',
+            return_value=payload,
+        ):
+            self.assertTrue(batch_flow_metrics.artifact_needs_rerun('old.json.gz'))
+
     def test_artifact_without_one_vs_rest_metrics_needs_rerun(self):
         population = {
             'support': 2,
@@ -24,7 +48,13 @@ class BatchFlowMetricsTests(unittest.TestCase):
         }
         payload = {
             'results': {
-                'run0': {'per_population': {'1': population, '2': population.copy()}},
+                'run0': {
+                    'f1_macro_known_conditional': 1.0,
+                    'f1_macro_known_open_set': 1.0,
+                    'n_pred_positive_on_truth_zero': 0,
+                    'ungated_leakage_rate': float('nan'),
+                    'per_population': {'1': population, '2': population.copy()},
+                },
             },
         }
 
@@ -48,7 +78,13 @@ class BatchFlowMetricsTests(unittest.TestCase):
         }
         payload = {
             'results': {
-                'run0': {'per_population': {'1': population, '2': population.copy()}},
+                'run0': {
+                    'f1_macro_known_conditional': 1.0,
+                    'f1_macro_known_open_set': 1.0,
+                    'n_pred_positive_on_truth_zero': 0,
+                    'ungated_leakage_rate': float('nan'),
+                    'per_population': {'1': population, '2': population.copy()},
+                },
             },
         }
 
